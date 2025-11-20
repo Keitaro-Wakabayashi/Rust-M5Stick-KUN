@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+build/
+managed_components/
+dependencies.lock
+
+# Temporary
+*.tmp
+*.log

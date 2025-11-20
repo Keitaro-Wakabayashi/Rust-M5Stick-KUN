@@ -1,0 +1,86 @@
+{
+  "name": "M5StickC Plus2 Rust Development (with AI)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "runArgs": [
+    // Podman-compatible settings
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=label=disable"
+  ],
+  "mounts": [
+    // Persist VSCode server extensions
+    "source=m5stick-vscode-server,target=/home/esp/.vscode-server,type=volume",
+    // Persist cargo registry to speed up builds
+    "source=m5stick-cargo-registry,target=/home/esp/.cargo/registry,type=volume",
+    "source=m5stick-cargo-git,target=/home/esp/.cargo/git,type=volume",
+    // Persist espressif tools
+    "source=m5stick-espressif,target=/home/esp/.espressif,type=volume",
+    // Persist Claude Code config
+    "source=m5stick-claude-config,target=/home/esp/.claude,type=volume"
+  ],
+  "remoteUser": "esp",
+  // VSCode extensions to install
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Claude Code extension
+        "anthropic.claude-code",
+        // Rust development
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        // ESP32 development
+        "espressif.esp-idf-extension",
+        // General utilities
+        "ms-vscode.cpptools",
+        "ms-python.python",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        // Rust Analyzer settings for ESP32
+        "rust-analyzer.check.allTargets": false,
+        "rust-analyzer.check.noDefaultFeatures": false,
+        "rust-analyzer.cargo.target": "xtensa-esp32-espidf",
+        "rust-analyzer.cargo.allFeatures": false,
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "rust-analyzer.procMacro.enable": true,
+        "rust-analyzer.linkedProjects": [
+          "./Cargo.toml"
+        ],
+        // Terminal settings
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "/bin/bash",
+            "icon": "terminal-bash"
+          }
+        },
+        // File associations
+        "files.associations": {
+          "*.rs": "rust",
+          "*.toml": "toml",
+          "sdkconfig": "kconfig",
+          "sdkconfig.defaults": "kconfig"
+        },
+        // Editor settings
+        "editor.formatOnSave": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        }
+      }
+    }
+  },
+  // Post-create command to setup ESP Rust toolchain
+  "postCreateCommand": "espup install && cd /workspaces/M5Stick-Kun && rustup override set esp && echo 'ESP32 Rust environment ready!'",
+  // Forward ports (if needed for web services)
+  "forwardPorts": [],
+  // Environment variables
+  "containerEnv": {
+    "RUST_BACKTRACE": "1",
+    "ESP_IDF_VERSION": "v5.5"
+  },
+  // Lifecycle scripts
+  "initializeCommand": "echo Initializing container..."
+}

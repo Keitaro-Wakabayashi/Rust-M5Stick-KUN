@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(tree:*)",
+      "Bash(cargo build:*)",
+      "Bash(env)",
+      "Bash(cargo search:*)",
+      "WebFetch(domain:crates.io)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(bash -c \"source /opt/esp/idf/export.sh 2>/dev/null; ./install.sh esp32 2>&1 | tail -30\")",
+      "Bash(wait)",
+      "Bash(cargo clean:*)",
+      "Bash(tee:*)",
+      "Bash(espup:*)",
+      "Bash(rustup toolchain:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
