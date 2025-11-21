@@ -37,7 +37,7 @@ use esp_hal::{
 use esp_backtrace as _;
 use log::*;
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
+// ESP-IDF App Descriptor (espflashが必要とする)
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // ハードウェアピン定義
@@ -67,7 +67,7 @@ fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // ヒープアロケーター初期化
+    // ヒープアロケーター初期化（ESP-IDFブートローダーのreclaimedメモリを使用）
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
 
     info!("M5StickC Plus2 倒立振子 起動中...");
