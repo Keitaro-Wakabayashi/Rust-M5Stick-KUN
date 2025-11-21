@@ -9,6 +9,11 @@
     "--cap-add=SYS_PTRACE",
     "--security-opt=label=disable"
   ],
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "4gb",
+    "storage": "32gb"
+  },
   "mounts": [
     // Persist VSCode server extensions
     "source=m5stick-vscode-server,target=/home/esp/.vscode-server,type=volume",
@@ -46,9 +51,7 @@
         "rust-analyzer.cargo.allFeatures": false,
         "rust-analyzer.cargo.buildScripts.enable": true,
         "rust-analyzer.procMacro.enable": true,
-        "rust-analyzer.linkedProjects": [
-          "./Cargo.toml"
-        ],
+        "rust-analyzer.linkedProjects": ["./Cargo.toml"],
         // Terminal settings
         "terminal.integrated.defaultProfile.linux": "bash",
         "terminal.integrated.profiles.linux": {
@@ -73,7 +76,7 @@
     }
   },
   // Post-create command to setup ESP Rust toolchain
-  "postCreateCommand": "espup install && cd /workspaces/M5Stick-Kun && rustup override set esp && echo 'ESP32 Rust environment ready!'",
+  "postCreateCommand": "bash -c 'espup install && cd /workspaces/M5Stick-Kun && rustup override set esp && cat /workspaces/M5Stick-Kun/.devcontainer/welcome.txt || echo \"ESP32 Rust environment ready!\"'",
   // Forward ports (if needed for web services)
   "forwardPorts": [],
   // Environment variables

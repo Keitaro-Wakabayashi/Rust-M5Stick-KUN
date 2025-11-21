@@ -1,0 +1,32 @@
+
+====================================================
+  M5StickC Plus2 Rust 開発環境へようこそ！
+====================================================
+
+ESP32 Rust環境のセットアップが完了しました。
+
+【開発ワークフロー】
+┌─────────────────────────────────────────┐
+│ 1. コンテナ内でビルド                   │
+│    $ cargo build                        │
+│                                         │
+│ 2. ホスト側でフラッシュ                 │
+│    $ cargo espflash flash --monitor     │
+│                                         │
+│    ※デバイスは自動検出されます          │
+└─────────────────────────────────────────┘
+
+【ホスト側のセットアップ（初回のみ）】
+ホスト側（WSL/Linux）に以下をインストール：
+  $ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  $ cargo install cargo-espflash
+
+【便利なコマンド】
+  build   : cargo build のエイリアス
+  monitor : cargo espflash monitor（シリアルモニタ）
+
+【参考】
+- cargo espflash ドキュメント: https://github.com/esp-rs/espflash
+- M5StickC Plus2: https://docs.m5stack.com/en/core/M5StickC%20PLUS2
+
+====================================================
