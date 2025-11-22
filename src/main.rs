@@ -6,10 +6,15 @@
 //! - MCU: ESP32-PICO-V3-02 (ESP32 dual-core Xtensa LX6)
 //! - LCD: ST7789V (135x240 SPI)
 //! - IMU: MPU6886 (I2C)
-//! - PMIC: AXP192 (I2C)
+//! - 電源: TP4057 (充電IC), GPIO4 (HOLD - 電源保持)
+//! - バッテリー: 200mAh, 電圧測定 GPIO38
 //! - モーター: GPIO 0, 26 (PWM servo control)
 //! - ボタン: GPIO 37 (A), GPIO 39 (B)
 //! - LED: GPIO 19
+//!
+//! ## 注意事項
+//! M5StickC Plus2にはAXP192が搭載されていません。
+//! バッテリー駆動を維持するには、起動後にGPIO4 (HOLD)をHIGHに保つ必要があります。
 //!
 //! ## TODO: 移植予定の機能
 //! 1. [x] 基本セットアップ
@@ -75,6 +80,12 @@ fn main() -> ! {
     // Delay初期化
     let mut delay = Delay::new();
 
+    // 電源HOLD (GPIO 4 - M5StickC Plus2で必須！)
+    // Plus2にはAXP192がなく、起動後にGPIO4をHIGHに保持しないと電源が切れる
+    let mut power_hold = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
+    power_hold.set_high(); // 電源保持
+    info!("電源HOLD有効 (GPIO4)");
+
     // LED初期化 (GPIO 19 - M5StickC Plus2では反転ロジック)
     let mut led = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
     led.set_high(); // 起動中はLED点灯
@@ -112,18 +123,10 @@ fn main() -> ! {
     // I2C初期化 (SDA: GPIO21, SCL: GPIO22, 100kHz)
     info!("I2C初期化中...");
     let i2c_config = I2cConfig::default().with_frequency(Rate::from_khz(100));
-    let mut i2c = I2c::new(peripherals.I2C0, i2c_config)
+    let i2c = I2c::new(peripherals.I2C0, i2c_config)
         .expect("I2C init failed")
         .with_sda(peripherals.GPIO21)
         .with_scl(peripherals.GPIO22);
-
-    // AXP192 (PMIC) 初期化 - バッテリー駆動を有効化
-    info!("AXP192初期化中...");
-    if let Err(_) = power::init_axp192(&mut i2c) {
-        error!("AXP192初期化失敗 - バッテリー駆動が無効な可能性あり");
-    } else {
-        info!("AXP192初期化完了 - バッテリー駆動有効");
-    }
 
     // MPU6886初期化
     info!("MPU6886初期化中...");
@@ -865,105 +868,18 @@ mod nvs {
     // TODO: オフセット値の保存・読み込み
 }
 
-/// バッテリー監視モジュール (AXP192)
+/// バッテリー監視モジュール (M5StickC Plus2用)
+///
+/// Plus2にはAXP192が搭載されておらず、以下の構成:
+/// - バッテリー充電IC: TP4057
+/// - バッテリー電圧測定: GPIO38 (ADC) - R40/R41分圧
+/// - 電源保持: GPIO4 (HOLD) - 起動後HIGHを維持必須
 #[allow(dead_code)]
 mod power {
-    use embedded_hal::i2c::I2c;
-
-    // AXP192 I2Cアドレス
-    const AXP192_ADDR: u8 = 0x34;
-
-    // AXP192 レジスタ
-    const AXP192_LDO23_DC123_CTRL: u8 = 0x12; // LDO2/3, DC1/2/3 出力制御
-    const AXP192_DC1_VOLTAGE: u8 = 0x26;      // DC1 電圧設定 (ESP32給電)
-    const AXP192_LDO23_VOLTAGE: u8 = 0x28;    // LDO2/3 電圧設定
-    const AXP192_VBUS_IPSOUT: u8 = 0x30;      // VBUS-IPSOUT パス設定
-    const AXP192_SHUTDOWN_CTRL: u8 = 0x32;    // シャットダウン/起動制御
-    const AXP192_CHARGE_CTRL1: u8 = 0x33;     // 充電制御1
-    const AXP192_PEK: u8 = 0x36;              // PEK (電源ボタン) 設定
-    const AXP192_DCDC_FREQ: u8 = 0x37;        // DC-DC周波数設定
-    const AXP192_BAT_CHARGE_CTRL: u8 = 0x82;  // バッテリー充電制御
-    const AXP192_ADC_EN1: u8 = 0x82;          // ADC有効化1
-    const AXP192_ADC_EN2: u8 = 0x83;          // ADC有効化2
-    const AXP192_GPIO0_CTRL: u8 = 0x90;       // GPIO0 制御
-    const AXP192_GPIO0_LDOOUT: u8 = 0x91;     // GPIO0 LDO出力電圧
-
-    /// AXP192を初期化してバッテリー駆動を有効化
-    ///
-    /// M5StickC Plus2で必要な電源設定:
-    /// - DC1: ESP32給電 (3.3V)
-    /// - LDO2: LCD/Peripherals給電 (3.0V)
-    /// - LDO3: IMU給電 (1.8V)
-    /// - バッテリー充電有効
-    /// - ADC有効（電圧監視用）
-    pub fn init_axp192<I2C, E>(i2c: &mut I2C) -> Result<(), E>
-    where
-        I2C: I2c<Error = E>,
-    {
-        // LDO2/3, DC1/2/3 を有効化
-        // bit7: EXTEN, bit6: DC-DC2, bit4: LDO3, bit3: LDO2, bit1: DC-DC3, bit0: DC-DC1
-        write_register(i2c, AXP192_LDO23_DC123_CTRL, 0b01011101)?; // DC1, LDO2, LDO3, DCDC3 ON
-
-        // DC1 電圧設定: 3.3V (ESP32給電)
-        // DC1: 0.7V ~ 3.5V, 25mV step, 0x6C = 3.3V
-        write_register(i2c, AXP192_DC1_VOLTAGE, 0x6C)?;
-
-        // LDO2/3 電圧設定
-        // LDO2[7:4]: 1.8V ~ 3.3V, 100mV step, 0xC = 3.0V (LCD/Peripherals)
-        // LDO3[3:0]: 1.8V ~ 3.3V, 100mV step, 0x0 = 1.8V (IMU)
-        write_register(i2c, AXP192_LDO23_VOLTAGE, 0xC0)?; // LDO2=3.0V, LDO3=1.8V
-
-        // VBUS-IPSOUT パス設定: VBUS経由での起動を許可
-        write_register(i2c, AXP192_VBUS_IPSOUT, 0x80)?;
-
-        // PEK (電源ボタン) 設定
-        // bit7-6: 起動時間 (0b00 = 128ms)
-        // bit5-4: 長押しシャットダウン時間 (0b11 = 10s)
-        // bit3-2: 自動シャットダウン機能 OFF
-        // bit1-0: シャットダウン後の再起動遅延
-        write_register(i2c, AXP192_PEK, 0x4C)?;
-
-        // DC-DC周波数: 1.5MHz (デフォルト)
-        write_register(i2c, AXP192_DCDC_FREQ, 0x41)?;
-
-        // 充電制御: 100mA, 4.2V
-        // bit7: 充電有効, bit6-5: 電圧 (0b00=4.1V, 0b01=4.15V, 0b10=4.2V)
-        // bit4: 充電終了電流 (0=充電停止しない), bit3-0: 充電電流 (0b0000=100mA)
-        write_register(i2c, AXP192_CHARGE_CTRL1, 0b10100000)?; // 100mA, 4.2V
-
-        // ADC有効化: バッテリー電圧とVBUS電圧を測定
-        // bit7: バッテリー電圧, bit1: VBUS電圧
-        write_register(i2c, AXP192_ADC_EN1, 0b10000010)?;
-
-        // GPIO0: LDO出力モード (LCD backlight用)
-        write_register(i2c, AXP192_GPIO0_CTRL, 0x02)?;
-        write_register(i2c, AXP192_GPIO0_LDOOUT, 0xF0)?; // 3.0V
-
-        Ok(())
-    }
-
-    /// AXP192レジスタに書き込み
-    fn write_register<I2C, E>(i2c: &mut I2C, reg: u8, value: u8) -> Result<(), E>
-    where
-        I2C: I2c<Error = E>,
-    {
-        i2c.write(AXP192_ADDR, &[reg, value])
-    }
-
-    /// バッテリー電圧を取得 (V単位)
-    #[allow(dead_code)]
-    pub fn get_battery_voltage<I2C, E>(i2c: &mut I2C) -> Result<f32, E>
-    where
-        I2C: I2c<Error = E>,
-    {
-        // バッテリー電圧レジスタ: 0x78 (MSB), 0x79 (LSB)
-        let mut buf = [0u8; 2];
-        i2c.write_read(AXP192_ADDR, &[0x78], &mut buf)?;
-
-        // 12bit値: 1.1mV/bit
-        let raw = ((buf[0] as u16) << 4) | ((buf[1] as u16) & 0x0F);
-        let voltage = (raw as f32) * 1.1 / 1000.0; // mV -> V
-
-        Ok(voltage)
-    }
+    // M5StickC Plus2の電源管理
+    // GPIO4 (HOLD): 電源保持ピン（main関数で初期化済み）
+    // GPIO38 (ADC): バッテリー電圧測定（R40/R41分圧経由）
+    //
+    // 注意: Plus2にはAXP192が搭載されていないため、
+    //       バッテリー駆動を維持するにはGPIO4をHIGHに保つ必要がある
 }
