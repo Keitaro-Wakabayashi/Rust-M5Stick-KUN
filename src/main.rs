@@ -155,10 +155,27 @@ fn main() -> ! {
         info!("Kalmanフィルター初期化: angle = {:.2}°", pitch);
     }
 
+    // PIDコントローラー初期化
+    let mut pid = pid::PidController::new();
+    info!("PIDコントローラー初期化: kp={:.2}, ki={:.2}, kd={:.2}", pid.kp, pid.ki, pid.kd);
+
+    // モーターコントローラー初期化 (GPIO 0: 左, GPIO 26: 右)
+    let motor_pin_l = Output::new(peripherals.GPIO0, Level::Low, OutputConfig::default());
+    let motor_pin_r = Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default());
+    let mut motor = motor::MotorController::new(motor_pin_l, motor_pin_r);
+
+    // モーター有効化（テスト用: 3秒後に有効化）
+    info!("3秒後にモーター有効化...");
+    delay.delay_millis(3000);
+    motor.set_enabled(true);
+    info!("モーター有効化完了");
+
     info!("セットアップ完了!");
 
-    // メインループ: IMUデータを読み取ってKalmanフィルターで処理
+    // メインループ: IMU→Kalman→PID→Motor制御
     const DT: f32 = 0.01; // 10ms = 0.01秒
+    let mut prev_pitch: f32 = 0.0;
+
     loop {
         // 加速度とジャイロを取得
         if let (Ok(accel), Ok(gyro), Ok(pitch_raw)) = (
@@ -169,22 +186,35 @@ fn main() -> ! {
             // Kalmanフィルター更新（Y軸ジャイロを使用）
             let pitch_filtered = kalman.update(pitch_raw, gyro[1], DT);
 
+            // 角速度を計算（微分）
+            let d_pitch = (pitch_filtered - prev_pitch) / DT;
+            prev_pitch = pitch_filtered;
+
+            // PID制御計算
+            let power = pid.update(pitch_filtered, d_pitch, 0.0);
+
+            // モーター駆動
+            motor.drive(power, power);
+
             // LCDに描画（フィルター後の角度を表示）
             if let Err(_) = display::draw_imu_data(&mut display, accel, gyro, pitch_filtered) {
                 error!("LCD描画エラー");
             }
 
-            // シリアル出力（生データとフィルター後を比較）
+            // シリアル出力（制御状態を表示）
             info!(
-                "Pitch: Raw={:.2}° | Filtered={:.2}° | Gyro Y={:.1}°/s",
-                pitch_raw, pitch_filtered, gyro[1]
+                "Pitch={:.2}° | dP={:.1}°/s | Power={:.0}",
+                pitch_filtered, d_pitch, power
             );
+
+            // PWMパルス生成（20ms周期の一部として実行）
+            motor.pulse_drive(&mut delay);
         } else {
             error!("IMUデータ取得失敗");
+            delay.delay_millis(10);
         }
 
-        // 10ms待機（100Hz更新）
-        delay.delay_millis(10);
+        // 次のループまで待機（PWM生成後の残り時間は自動調整される）
     }
 }
 
@@ -691,28 +721,46 @@ mod pid {
 
 /// モーター制御モジュール
 ///
-/// サーボモーター(連続回転)をPWMで制御（Phase 4で完全実装予定）
+/// サーボモーター(連続回転)をGPIO+Timer疑似PWMで制御
 mod motor {
-    /// モーター制御構造体（Phase 4で完全実装予定）
-    pub struct MotorController {
+    use esp_hal::gpio::Output;
+
+    /// モーター制御構造体
+    pub struct MotorController<'d> {
+        pin_l: Output<'d>,
+        pin_r: Output<'d>,
         offset_l: i16,
         offset_r: i16,
         neutral: u32, // 1500us
         enabled: bool,
+        // PWM状態保持
+        pulse_l_us: u32,
+        pulse_r_us: u32,
     }
 
-    impl MotorController {
-        /// モーターコントローラーを初期化（スタブ）
-        pub fn new() -> Self {
+    impl<'d> MotorController<'d> {
+        /// モーターコントローラーを初期化
+        ///
+        /// # Arguments
+        /// * `pin_l` - 左モーターGPIO (GPIO 0)
+        /// * `pin_r` - 右モーターGPIO (GPIO 26)
+        pub fn new(
+            pin_l: Output<'d>,
+            pin_r: Output<'d>,
+        ) -> Self {
             Self {
+                pin_l,
+                pin_r,
                 offset_l: 0,
                 offset_r: 0,
                 neutral: 1500,
                 enabled: false,
+                pulse_l_us: 1500,
+                pulse_r_us: 1500,
             }
         }
 
-        /// モーターを駆動（スタブ: ログ出力のみ）
+        /// モーターを駆動
         ///
         /// # Arguments
         /// * `power_l` - 左モーターパワー (-1000 ~ 1000)
@@ -721,11 +769,57 @@ mod motor {
             if !self.enabled {
                 return;
             }
-            // TODO: Phase 4でLEDC PWM実装
-            log::debug!("Motor: L={:.1}, R={:.1}", power_l, power_r);
+
+            // パワーをPWMパルス幅に変換 (500us ~ 2500us)
+            // 左モーターは反転（-power_l）
+            let pulse_l = self.neutral as f32 - power_l + self.offset_l as f32;
+            let pulse_r = self.neutral as f32 + power_r + self.offset_r as f32;
+
+            // 500us ~ 2500us にクランプ
+            self.pulse_l_us = pulse_l.clamp(500.0, 2500.0) as u32;
+            self.pulse_r_us = pulse_r.clamp(500.0, 2500.0) as u32;
         }
 
-        /// モーターを停止
+        /// 疑似PWMパルスを生成（メインループから呼び出す）
+        ///
+        /// Arduino版のpulse_drive()と同等の処理
+        /// 50Hz = 20ms周期のPWMを生成
+        pub fn pulse_drive<D: embedded_hal::delay::DelayNs>(&mut self, delay: &mut D) {
+            if !self.enabled {
+                return;
+            }
+
+            // パルス開始: 両方HIGHに設定
+            self.pin_l.set_high();
+            self.pin_r.set_high();
+
+            // 短い方のパルス幅まで待機
+            let min_pulse = self.pulse_l_us.min(self.pulse_r_us);
+            delay.delay_us(min_pulse);
+
+            // 短い方を先にLOWに
+            if self.pulse_l_us <= self.pulse_r_us {
+                self.pin_l.set_low();
+                if self.pulse_l_us < self.pulse_r_us {
+                    delay.delay_us(self.pulse_r_us - self.pulse_l_us);
+                    self.pin_r.set_low();
+                } else {
+                    self.pin_r.set_low();
+                }
+            } else {
+                self.pin_r.set_low();
+                delay.delay_us(self.pulse_l_us - self.pulse_r_us);
+                self.pin_l.set_low();
+            }
+
+            // 残りの周期を待機 (20ms - パルス幅)
+            let max_pulse = self.pulse_l_us.max(self.pulse_r_us);
+            if max_pulse < 20000 {
+                delay.delay_us(20000 - max_pulse);
+            }
+        }
+
+        /// モーターを停止（ニュートラル位置）
         pub fn stop(&mut self) {
             self.drive(0.0, 0.0);
         }
@@ -733,18 +827,17 @@ mod motor {
         /// モーターを有効化/無効化
         pub fn set_enabled(&mut self, enabled: bool) {
             self.enabled = enabled;
+            if !enabled {
+                self.stop();
+                self.pin_l.set_low();
+                self.pin_r.set_low();
+            }
         }
 
         /// オフセットを設定
         pub fn set_offset(&mut self, offset_l: i16, offset_r: i16) {
             self.offset_l = offset_l;
             self.offset_r = offset_r;
-        }
-    }
-
-    impl Default for MotorController {
-        fn default() -> Self {
-            Self::new()
         }
     }
 }
