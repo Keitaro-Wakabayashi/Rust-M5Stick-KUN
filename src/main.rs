@@ -63,6 +63,23 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // const I2C_SDA: u8 = 21;
 // const I2C_SCL: u8 = 22;
 
+/// ロボットの状態
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RobotState {
+    /// キャリブレーション準備中
+    CalibrationReady,
+    /// キャリブレーション実行中
+    Calibrating,
+    /// 動作姿勢への移行待ち
+    WaitingForUpright,
+    /// 垂直姿勢で待機中（-30°～+30°）
+    Ready,
+    /// バランス制御実行中
+    Balancing,
+    /// エラー（範囲外）
+    Error,
+}
+
 #[esp_hal::main]
 fn main() -> ! {
     // ロガー初期化
@@ -143,126 +160,220 @@ fn main() -> ! {
         }
     }
 
-    // キャリブレーション実行
-    info!("============================================");
-    info!("キャリブレーション開始");
-    info!("重要: M5StickCを以下の姿勢で静止させてください");
-    info!("  - 画面: 上向き（天井を向く）");
-    info!("  - 本体: 水平に置く");
-    info!("  ※ Arduino版と同じキャリブレーション方式");
-    info!("3秒後に開始します...");
-    info!("============================================");
-    delay.delay_millis(3000);
-
-    info!("キャリブレーション実行中 (500サンプル, 約1秒)...");
-    match imu.calibrate(&mut delay) {
-        Ok(_) => {
-            info!("キャリブレーション完了");
-            // デバッグ: キャリブレーション直後の値を確認
-            if let (Ok(accel), Ok(gyro)) = (imu.read_accel_calibrated(), imu.read_gyro_calibrated()) {
-                info!("キャリブレーション後の値:");
-                info!("  Accel: X={:.3}g Y={:.3}g Z={:.3}g", accel[0], accel[1], accel[2]);
-                info!("  Gyro: X={:.1}°/s Y={:.1}°/s Z={:.1}°/s", gyro[0], gyro[1], gyro[2]);
-                info!("  期待値: Accel全軸≈0g, Gyro全軸≈0°/s");
-            }
-        }
-        Err(_) => {
-            error!("キャリブレーション失敗!");
-            loop {
-                led.toggle();
-                delay.delay_millis(100);
-            }
-        }
-    }
-
-    led.set_low(); // キャリブレーション完了、LED消灯
-
-    // ユーザーに動作姿勢への移行を促す
-    info!("============================================");
-    info!("キャリブレーション完了！");
-    info!("次の動作姿勢に変更してください:");
-    info!("  - 画面: 前向き（ユーザーに向く）");
-    info!("  - USB端子: 上向き");
-    info!("  - 本体: 垂直に立てる");
-    info!("姿勢を変更したら、5秒以内に安定させてください...");
-    info!("============================================");
-    delay.delay_millis(5000);
-
-    // Kalmanフィルター初期化
-    let mut kalman = kalman::KalmanFilter::new();
-    // 初期角度を設定（動作姿勢での加速度計から）
-    if let Ok(pitch) = imu.get_pitch() {
-        kalman.set_angle(pitch);
-        info!("Kalmanフィルター初期化: angle = {:.2}°", pitch);
-        info!("  期待値: 0° (垂直姿勢)");
-    }
-
-    // PIDコントローラー初期化
-    let mut pid = pid::PidController::new();
-    info!("PIDコントローラー初期化: kp={:.2}, ki={:.2}, kd={:.2}", pid.kp, pid.ki, pid.kd);
-
-    // モーターコントローラー初期化 (GPIO 0: 左, GPIO 26: 右)
+    // モーターピンを先に初期化（ループ外で一度だけ）
     let motor_pin_l = Output::new(peripherals.GPIO0, Level::Low, OutputConfig::default());
     let motor_pin_r = Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default());
-    let mut motor = motor::MotorController::new(motor_pin_l, motor_pin_r);
 
-    // モーター有効化（テスト用: 3秒後に有効化）
-    info!("3秒後にモーター有効化...");
-    delay.delay_millis(3000);
-    motor.set_enabled(true);
-    info!("モーター有効化完了");
-
-    info!("セットアップ完了!");
-
-    // メインループ: IMU→Kalman→PID→Motor制御
-    const DT: f32 = 0.01; // 10ms = 0.01秒
+    // 状態マシン初期化
+    let mut state = RobotState::CalibrationReady;
+    let mut wait_count: u16 = 0;
     let mut prev_pitch: f32 = 0.0;
+    let mut last_display_update: u32 = 0;
+    const DT: f32 = 0.01; // 10ms = 0.01秒
 
+    // Kalman, PID, Motorを後で初期化
+    let mut kalman_opt: Option<kalman::KalmanFilter> = None;
+    let mut pid_opt: Option<pid::PidController> = None;
+    let mut motor_opt: Option<motor::MotorController> = Some(motor::MotorController::new(motor_pin_l, motor_pin_r));
+
+    info!("セットアップ完了! 状態マシン開始");
+
+    // メインループ: 状態マシンベース
     loop {
-        // 加速度とジャイロを取得
-        if let (Ok(accel), Ok(gyro), Ok(pitch_raw)) = (
-            imu.read_accel_calibrated(),
-            imu.read_gyro_calibrated(),
-            imu.get_pitch(),
-        ) {
-            // デバッグ: 加速度生データを出力
-            info!(
-                "Accel: X={:.3}g Y={:.3}g Z={:.3}g | Pitch_raw={:.2}°",
-                accel[0], accel[1], accel[2], pitch_raw
-            );
+        match state {
+            // ==================== キャリブレーション準備 ====================
+            RobotState::CalibrationReady => {
+                info!("状態: CalibrationReady");
 
-            // Kalmanフィルター更新（X軸ジャイロを使用）
-            let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
+                // LCD表示
+                if let Err(_) = display::draw_calibration_ready(&mut display) {
+                    error!("LCD描画エラー");
+                }
 
-            // 角速度を計算（微分）
-            let d_pitch = (pitch_filtered - prev_pitch) / DT;
-            prev_pitch = pitch_filtered;
+                led.set_high(); // LED点灯
+                delay.delay_millis(3000); // 3秒待機
 
-            // PID制御計算
-            let power = pid.update(pitch_filtered, d_pitch, 0.0);
-
-            // モーター駆動
-            motor.drive(power, power);
-
-            // LCDに描画（フィルター後の角度を表示）
-            if let Err(_) = display::draw_imu_data(&mut display, accel, gyro, pitch_filtered) {
-                error!("LCD描画エラー");
+                // 次の状態へ
+                state = RobotState::Calibrating;
             }
 
-            // シリアル出力（制御状態を表示）
-            info!(
-                "Pitch_filtered={:.2}° | Gyro X={:.1}°/s | Power={:.0}",
-                pitch_filtered, gyro[0], power
-            );
+            // ==================== キャリブレーション実行 ====================
+            RobotState::Calibrating => {
+                info!("状態: Calibrating");
 
-            // PWMパルス生成（20ms周期の一部として実行）
-            motor.pulse_drive(&mut delay);
-        } else {
-            error!("IMUデータ取得失敗");
-            delay.delay_millis(10);
+                // LCD表示
+                if let Err(_) = display::draw_calibrating(&mut display) {
+                    error!("LCD描画エラー");
+                }
+
+                // キャリブレーション実行
+                match imu.calibrate(&mut delay) {
+                    Ok(_) => {
+                        info!("キャリブレーション完了");
+                        if let (Ok(accel), Ok(gyro)) = (imu.read_accel_calibrated(), imu.read_gyro_calibrated()) {
+                            info!("  Accel: X={:.3}g Y={:.3}g Z={:.3}g", accel[0], accel[1], accel[2]);
+                            info!("  Gyro: X={:.1}°/s Y={:.1}°/s Z={:.1}°/s", gyro[0], gyro[1], gyro[2]);
+                        }
+                        led.set_low(); // LED消灯
+                        state = RobotState::WaitingForUpright;
+                    }
+                    Err(_) => {
+                        error!("キャリブレーション失敗!");
+                        loop {
+                            led.toggle();
+                            delay.delay_millis(100);
+                        }
+                    }
+                }
+            }
+
+            // ==================== 動作姿勢への移行待ち ====================
+            RobotState::WaitingForUpright => {
+                info!("状態: WaitingForUpright");
+
+                // LCD表示（Stand Up!）
+                if let Err(_) = display::draw_stand_up(&mut display) {
+                    error!("LCD描画エラー");
+                }
+
+                // LED短い点滅（3回）
+                for _ in 0..3 {
+                    led.set_high();
+                    delay.delay_millis(200);
+                    led.set_low();
+                    delay.delay_millis(200);
+                }
+
+                // 5秒待機（ユーザーが姿勢を変更）
+                delay.delay_millis(5000);
+
+                // Kalman, PID初期化
+                let mut kalman = kalman::KalmanFilter::new();
+                if let Ok(pitch) = imu.get_pitch() {
+                    kalman.set_angle(pitch);
+                    info!("Kalman初期化: angle = {:.2}°", pitch);
+                }
+                kalman_opt = Some(kalman);
+
+                let pid = pid::PidController::new();
+                info!("PID初期化: kp={:.2}, ki={:.2}, kd={:.2}", pid.kp, pid.ki, pid.kd);
+                pid_opt = Some(pid);
+
+                wait_count = 0;
+                state = RobotState::Ready;
+            }
+
+            // ==================== Ready（垂直姿勢待機） ====================
+            RobotState::Ready => {
+                // センサー読み取り
+                if let (Ok(_accel), Ok(gyro), Ok(pitch_raw)) = (
+                    imu.read_accel_calibrated(),
+                    imu.read_gyro_calibrated(),
+                    imu.get_pitch(),
+                ) {
+                    // Kalmanフィルター更新
+                    let kalman = kalman_opt.as_mut().unwrap();
+                    let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
+
+                    // 角度範囲チェック（-30° ～ +30°）
+                    if pitch_filtered >= -30.0 && pitch_filtered <= 30.0 {
+                        wait_count += 1;
+
+                        // LCD更新（100msごと = 10カウントごと）
+                        if wait_count % 10 == 0 {
+                            if let Err(_) = display::draw_ready(&mut display, wait_count) {
+                                error!("LCD描画エラー");
+                            }
+                            info!("Ready: wait_count={}, pitch={:.2}°", wait_count, pitch_filtered);
+                        }
+
+                        // 2秒間安定（200カウント）したら動作開始
+                        if wait_count >= 200 {
+                            info!("垂直姿勢安定！バランス制御開始");
+                            motor_opt.as_mut().unwrap().set_enabled(true);
+                            state = RobotState::Balancing;
+                        }
+                    } else {
+                        // 範囲外 → カウントリセット
+                        wait_count = 0;
+                        info!("角度範囲外: {:.2}°", pitch_filtered);
+                    }
+                } else {
+                    error!("センサー読み取りエラー");
+                }
+
+                delay.delay_millis(10);
+            }
+
+            // ==================== Balancing（制御実行中） ====================
+            RobotState::Balancing => {
+                // センサー読み取り
+                if let (Ok(_accel), Ok(gyro), Ok(pitch_raw)) = (
+                    imu.read_accel_calibrated(),
+                    imu.read_gyro_calibrated(),
+                    imu.get_pitch(),
+                ) {
+                    // Kalmanフィルター更新
+                    let kalman = kalman_opt.as_mut().unwrap();
+                    let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
+
+                    // 角度範囲チェック（-30° ～ +30°）
+                    if pitch_filtered < -30.0 || pitch_filtered > 30.0 {
+                        // 範囲外 → エラー状態へ
+                        error!("範囲外に倒れた: {:.2}°", pitch_filtered);
+                        motor_opt.as_mut().unwrap().set_enabled(false);
+                        pid_opt.as_mut().unwrap().reset();
+                        state = RobotState::Error;
+                        continue;
+                    }
+
+                    // 角速度計算
+                    let d_pitch = (pitch_filtered - prev_pitch) / DT;
+                    prev_pitch = pitch_filtered;
+
+                    // PID制御
+                    let pid = pid_opt.as_mut().unwrap();
+                    let power = pid.update(pitch_filtered, d_pitch, 0.0);
+
+                    // モーター駆動
+                    let motor = motor_opt.as_mut().unwrap();
+                    motor.drive(power, power);
+
+                    // LCD更新（100msごと）
+                    last_display_update += 1;
+                    if last_display_update >= 10 {
+                        if let Err(_) = display::draw_balancing(&mut display, pitch_filtered, power as i16) {
+                            error!("LCD描画エラー");
+                        }
+                        last_display_update = 0;
+                    }
+
+                    // PWMパルス生成
+                    motor.pulse_drive(&mut delay);
+                } else {
+                    error!("センサー読み取りエラー");
+                    delay.delay_millis(10);
+                }
+            }
+
+            // ==================== Error（範囲外） ====================
+            RobotState::Error => {
+                // LCD表示
+                if let Err(_) = display::draw_error(&mut display) {
+                    error!("LCD描画エラー");
+                }
+
+                // LED高速点滅
+                for _ in 0..10 {
+                    led.toggle();
+                    delay.delay_millis(100);
+                }
+
+                // Ready状態に戻る
+                wait_count = 0;
+                state = RobotState::Ready;
+            }
         }
-
-        // 次のループまで待機（PWM生成後の残り時間は自動調整される）
     }
 }
 
@@ -320,6 +431,176 @@ mod display {
             .expect("LCD init failed");
 
         display
+    }
+
+    /// キャリブレーション準備画面
+    pub fn draw_calibration_ready(display: &mut DisplayType) -> Result<(), ()> {
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル（白文字、大きめフォント）
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        // タイトル
+        Text::new("Calibrating", Point::new(20, 25), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // 指示
+        Text::new("Place device:", Point::new(5, 60), style)
+            .draw(display)
+            .map_err(|_| ())?;
+        Text::new("- Screen UP", Point::new(5, 75), style)
+            .draw(display)
+            .map_err(|_| ())?;
+        Text::new("- Horizontal", Point::new(5, 90), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Text::new("Starting in 3s", Point::new(15, 120), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
+
+    /// キャリブレーション実行中画面
+    pub fn draw_calibrating(display: &mut DisplayType) -> Result<(), ()> {
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::YELLOW);
+
+        Text::new("Calibrating", Point::new(20, 60), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Text::new("Do not move!", Point::new(20, 100), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
+
+    /// 姿勢変更待機画面
+    pub fn draw_stand_up(display: &mut DisplayType) -> Result<(), ()> {
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::GREEN);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        Text::new("Stand Up!", Point::new(25, 50), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Text::new("Position:", Point::new(5, 90), style)
+            .draw(display)
+            .map_err(|_| ())?;
+        Text::new("- Screen FRONT", Point::new(5, 105), style)
+            .draw(display)
+            .map_err(|_| ())?;
+        Text::new("- USB UP", Point::new(5, 120), style)
+            .draw(display)
+            .map_err(|_| ())?;
+        Text::new("- Vertical", Point::new(5, 135), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
+
+    /// Ready画面（角度範囲内で待機中）
+    pub fn draw_ready(display: &mut DisplayType, wait_count: u16) -> Result<(), ()> {
+        use core::fmt::Write;
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+        use heapless::String;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::CYAN);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        Text::new("Ready...", Point::new(30, 60), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // カウントダウン表示
+        let mut buf: String<32> = String::new();
+        write!(&mut buf, "Wait: {:.1}s", (200 - wait_count) as f32 / 100.0).ok();
+        Text::new(&buf, Point::new(30, 100), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
+
+    /// Balancing画面（制御実行中）
+    pub fn draw_balancing(display: &mut DisplayType, pitch: f32, power: i16) -> Result<(), ()> {
+        use core::fmt::Write;
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+        use heapless::String;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::GREEN);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        Text::new("Balancing", Point::new(20, 30), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // Pitch角度（大きく表示）
+        let mut buf: String<32> = String::new();
+        write!(&mut buf, "Pitch: {:.1}", pitch).ok();
+        Text::new(&buf, Point::new(10, 80), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // Power値
+        buf.clear();
+        write!(&mut buf, "Power: {}", power).ok();
+        Text::new(&buf, Point::new(10, 110), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
+
+    /// Error画面（範囲外に倒れた）
+    pub fn draw_error(display: &mut DisplayType) -> Result<(), ()> {
+        use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル
+        let style_bold = MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::RED);
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        Text::new("ERROR!", Point::new(35, 60), style_bold)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Text::new("Out of range", Point::new(15, 100), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
     }
 
     /// IMUデータをLCDに表示
