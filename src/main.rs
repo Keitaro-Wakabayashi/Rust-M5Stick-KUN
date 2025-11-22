@@ -194,6 +194,12 @@ fn main() -> ! {
             imu.read_gyro_calibrated(),
             imu.get_pitch(),
         ) {
+            // デバッグ: 加速度生データを出力
+            info!(
+                "Accel: X={:.3}g Y={:.3}g Z={:.3}g | Pitch_raw={:.2}°",
+                accel[0], accel[1], accel[2], pitch_raw
+            );
+
             // Kalmanフィルター更新（X軸ジャイロを使用）
             let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
 
@@ -214,7 +220,7 @@ fn main() -> ! {
 
             // シリアル出力（制御状態を表示）
             info!(
-                "Pitch={:.2}° | Gyro X={:.1}°/s | Power={:.0}",
+                "Pitch_filtered={:.2}° | Gyro X={:.1}°/s | Power={:.0}",
                 pitch_filtered, gyro[0], power
             );
 
@@ -478,13 +484,15 @@ mod imu {
                 delay.delay_ms(2);
             }
 
+            // ジャイロオフセット: ゼロ点補正
             self.gyro_offset[0] = gyro_sum[0] / 500.0;
             self.gyro_offset[1] = gyro_sum[1] / 500.0;
             self.gyro_offset[2] = gyro_sum[2] / 500.0;
 
+            // 加速度オフセット: X/Y軸はゼロ点補正、Z軸は重力を残す
             self.accel_offset[0] = accel_sum[0] / 500.0;
             self.accel_offset[1] = accel_sum[1] / 500.0;
-            self.accel_offset[2] = accel_sum[2] / 500.0 - 1.0; // Z軸は重力(1g)を引く
+            self.accel_offset[2] = accel_sum[2] / 500.0 - 1.0; // Z軸: 測定値-1gをオフセットに
 
             Ok(())
         }
@@ -512,7 +520,8 @@ mod imu {
         /// 加速度からPitch角度を計算 (単位: 度)
         pub fn get_pitch(&mut self) -> Result<f32, E> {
             let accel = self.read_accel_calibrated()?;
-            let pitch = libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
+            // Pitch = atan2(Y, Z) だが、符号を反転して前傾=マイナス、後傾=プラスにする
+            let pitch = -libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
             Ok(pitch)
         }
     }
