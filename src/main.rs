@@ -519,7 +519,9 @@ mod imu {
 
         /// 加速度からPitch角度を計算 (単位: 度)
         pub fn get_pitch(&mut self) -> Result<f32, E> {
-            let accel = self.read_accel_calibrated()?;
+            // キャリブレーション済み値ではなく生の値を使用
+            // （倒立振子では相対角度が重要で、絶対オフセットは不要）
+            let accel = self.read_accel()?;
             // Pitch = atan2(Y, Z) だが、符号を反転して前傾=マイナス、後傾=プラスにする
             let pitch = -libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
             Ok(pitch)
