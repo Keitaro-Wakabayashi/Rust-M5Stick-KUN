@@ -167,9 +167,12 @@ fn main() -> ! {
     // 状態マシン初期化
     let mut state = RobotState::CalibrationReady;
     let mut wait_count: u16 = 0;
-    let mut prev_pitch: f32 = 0.0;
     let mut last_display_update: u32 = 0;
     const DT: f32 = 0.01; // 10ms = 0.01秒
+
+    // ローパスフィルター用変数（Arduino版: fil_N = 5）
+    let mut pitch_filter: f32 = 0.0;
+    const FIL_N: f32 = 5.0;
 
     // Kalman, PID, Motorを後で初期化
     let mut kalman_opt: Option<kalman::KalmanFilter> = None;
@@ -285,10 +288,13 @@ fn main() -> ! {
                 ) {
                     // Kalmanフィルター更新
                     let kalman = kalman_opt.as_mut().unwrap();
-                    let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
+                    let pitch_kalman = kalman.update(pitch_raw, gyro[0], DT);
+
+                    // ローパスフィルター（Arduino版と同じ）
+                    pitch_filter = (pitch_kalman + pitch_filter * (FIL_N - 1.0)) / FIL_N;
 
                     // 角度範囲チェック（-30° ～ +30°）
-                    if pitch_filtered >= -30.0 && pitch_filtered <= 30.0 {
+                    if pitch_filter >= -30.0 && pitch_filter <= 30.0 {
                         wait_count += 1;
 
                         // LCD更新（100msごと = 10カウントごと）
@@ -298,7 +304,7 @@ fn main() -> ! {
                             }
                             info!(
                                 "Ready: wait_count={}, pitch={:.2}°",
-                                wait_count, pitch_filtered
+                                wait_count, pitch_filter
                             );
                         }
 
@@ -311,7 +317,7 @@ fn main() -> ! {
                     } else {
                         // 範囲外 → カウントリセット
                         wait_count = 0;
-                        info!("角度範囲外: {:.2}°", pitch_filtered);
+                        info!("角度範囲外: {:.2}°", pitch_filter);
                     }
                 } else {
                     error!("センサー読み取りエラー");
@@ -330,25 +336,30 @@ fn main() -> ! {
                 ) {
                     // Kalmanフィルター更新
                     let kalman = kalman_opt.as_mut().unwrap();
-                    let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
+                    let pitch_kalman = kalman.update(pitch_raw, gyro[0], DT);
+
+                    // ローパスフィルター（Arduino版と同じ）
+                    // Pitch_filter = (Pitch + Pitch_filter * (fil_N - 1)) / fil_N
+                    pitch_filter = (pitch_kalman + pitch_filter * (FIL_N - 1.0)) / FIL_N;
 
                     // 角度範囲チェック（-30° ～ +30°）
-                    if pitch_filtered < -30.0 || pitch_filtered > 30.0 {
+                    if pitch_filter < -30.0 || pitch_filter > 30.0 {
                         // 範囲外 → エラー状態へ
-                        error!("範囲外に倒れた: {:.2}°", pitch_filtered);
+                        error!("範囲外に倒れた: {:.2}°", pitch_filter);
                         motor_opt.as_mut().unwrap().set_enabled(false);
                         pid_opt.as_mut().unwrap().reset();
                         state = RobotState::Error;
                         continue;
                     }
 
-                    // 角速度計算
-                    let d_pitch = (pitch_filtered - prev_pitch) / DT;
-                    prev_pitch = pitch_filtered;
+                    // Arduino版と同じ：生のジャイロ値を使用
+                    // dAngle = (gyro[0] - gyroOffset[0]) だが、
+                    // read_gyro_calibrated()が既にオフセット補正済みなので、そのまま使用
+                    let d_angle = gyro[0];
 
                     // PID制御
                     let pid = pid_opt.as_mut().unwrap();
-                    let power = pid.update(pitch_filtered, d_pitch, 0.0);
+                    let power = pid.update(pitch_filter, d_angle, 0.0);
 
                     // モーター駆動
                     let motor = motor_opt.as_mut().unwrap();
@@ -358,7 +369,7 @@ fn main() -> ! {
                     last_display_update += 1;
                     if last_display_update >= 10 {
                         if let Err(_) =
-                            display::draw_balancing(&mut display, pitch_filtered, power as i16)
+                            display::draw_balancing(&mut display, pitch_filter, power as i16)
                         {
                             error!("LCD描画エラー");
                         }
@@ -1034,7 +1045,7 @@ mod pid {
                 d_angle: 0.0,
                 k_speed: 0.0,
                 speed: 0.0,
-                i_limit: 10000.0, // アンチワインドアップのリミット（大きめに設定）
+                i_limit: 300.0, // Arduino版と同じ積分リミット
             }
         }
 
