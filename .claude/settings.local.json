@@ -15,7 +15,8 @@
       "Bash(tee:*)",
       "Bash(espup:*)",
       "Bash(rustup toolchain:*)",
-      "Bash(cargo info:*)"
+      "Bash(cargo info:*)",
+      "WebFetch(domain:blog.theembeddedrustacean.com)"
     ],
     "deny": [],
     "ask": []
