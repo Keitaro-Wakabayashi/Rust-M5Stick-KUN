@@ -32,6 +32,7 @@
 
 extern crate alloc;
 
+use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
@@ -39,7 +40,6 @@ use esp_hal::{
     i2c::master::{Config as I2cConfig, I2c},
     time::Rate,
 };
-use esp_backtrace as _;
 use log::*;
 
 // ESP-IDF App Descriptor (espflashが必要とする)
@@ -125,8 +125,8 @@ fn main() -> ! {
         .with_mosi(peripherals.GPIO15);
 
     let spi_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
-    let spi_device = ExclusiveDevice::new(spi, spi_cs, Delay::new())
-        .expect("SPI device creation failed");
+    let spi_device =
+        ExclusiveDevice::new(spi, spi_cs, Delay::new()).expect("SPI device creation failed");
 
     // LCD制御ピン (DC: GPIO14, RST: GPIO12)
     let lcd_dc = Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default());
@@ -174,7 +174,8 @@ fn main() -> ! {
     // Kalman, PID, Motorを後で初期化
     let mut kalman_opt: Option<kalman::KalmanFilter> = None;
     let mut pid_opt: Option<pid::PidController> = None;
-    let mut motor_opt: Option<motor::MotorController> = Some(motor::MotorController::new(motor_pin_l, motor_pin_r));
+    let mut motor_opt: Option<motor::MotorController> =
+        Some(motor::MotorController::new(motor_pin_l, motor_pin_r));
 
     info!("セットアップ完了! 状態マシン開始");
 
@@ -210,9 +211,17 @@ fn main() -> ! {
                 match imu.calibrate(&mut delay) {
                     Ok(_) => {
                         info!("キャリブレーション完了");
-                        if let (Ok(accel), Ok(gyro)) = (imu.read_accel_calibrated(), imu.read_gyro_calibrated()) {
-                            info!("  Accel: X={:.3}g Y={:.3}g Z={:.3}g", accel[0], accel[1], accel[2]);
-                            info!("  Gyro: X={:.1}°/s Y={:.1}°/s Z={:.1}°/s", gyro[0], gyro[1], gyro[2]);
+                        if let (Ok(accel), Ok(gyro)) =
+                            (imu.read_accel_calibrated(), imu.read_gyro_calibrated())
+                        {
+                            info!(
+                                "  Accel: X={:.3}g Y={:.3}g Z={:.3}g",
+                                accel[0], accel[1], accel[2]
+                            );
+                            info!(
+                                "  Gyro: X={:.1}°/s Y={:.1}°/s Z={:.1}°/s",
+                                gyro[0], gyro[1], gyro[2]
+                            );
                         }
                         led.set_low(); // LED消灯
                         state = RobotState::WaitingForUpright;
@@ -256,7 +265,10 @@ fn main() -> ! {
                 kalman_opt = Some(kalman);
 
                 let pid = pid::PidController::new();
-                info!("PID初期化: kp={:.2}, ki={:.2}, kd={:.2}", pid.kp, pid.ki, pid.kd);
+                info!(
+                    "PID初期化: kp={:.2}, ki={:.2}, kd={:.2}",
+                    pid.kp, pid.ki, pid.kd
+                );
                 pid_opt = Some(pid);
 
                 wait_count = 0;
@@ -284,7 +296,10 @@ fn main() -> ! {
                             if let Err(_) = display::draw_ready(&mut display, wait_count) {
                                 error!("LCD描画エラー");
                             }
-                            info!("Ready: wait_count={}, pitch={:.2}°", wait_count, pitch_filtered);
+                            info!(
+                                "Ready: wait_count={}, pitch={:.2}°",
+                                wait_count, pitch_filtered
+                            );
                         }
 
                         // 2秒間安定（200カウント）したら動作開始
@@ -342,7 +357,9 @@ fn main() -> ! {
                     // LCD更新（100msごと）
                     last_display_update += 1;
                     if last_display_update >= 10 {
-                        if let Err(_) = display::draw_balancing(&mut display, pitch_filtered, power as i16) {
+                        if let Err(_) =
+                            display::draw_balancing(&mut display, pitch_filtered, power as i16)
+                        {
                             error!("LCD描画エラー");
                         }
                         last_display_update = 0;
@@ -391,14 +408,11 @@ mod display {
         text::Text,
     };
     use embedded_hal_bus::spi::ExclusiveDevice;
-    use esp_hal::{
-        delay::Delay,
-        gpio::Output,
-        spi::master::Spi,
-    };
+    use esp_hal::{delay::Delay, gpio::Output, spi::master::Spi};
     use mipidsi::{models::ST7789, options::ColorInversion, Builder};
 
-    pub type SpiDeviceType = ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>;
+    pub type SpiDeviceType =
+        ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>;
 
     pub type DisplayType =
         mipidsi::Display<SPIInterface<SpiDeviceType, Output<'static>>, ST7789, Output<'static>>;
@@ -692,8 +706,8 @@ mod imu {
     const ACCEL_RANGE_2G: u8 = 0x00;
 
     // スケール係数
-    const GYRO_SCALE_250DPS: f32 = 131.0;  // LSB/(deg/s)
-    const ACCEL_SCALE_2G: f32 = 16384.0;   // LSB/g
+    const GYRO_SCALE_250DPS: f32 = 131.0; // LSB/(deg/s)
+    const ACCEL_SCALE_2G: f32 = 16384.0; // LSB/g
     const RAD_TO_DEG: f32 = 57.295779513082320876798154814105; // 180/π
 
     pub struct Mpu6886<I2C> {
@@ -737,7 +751,10 @@ mod imu {
             let who_am_i = self.read_register(WHO_AM_I)?;
             if who_am_i != 0x19 {
                 // MPU6886のデバイスIDは0x19
-                log::warn!("MPU6886 WHO_AM_I check failed: 0x{:02x} (expected 0x19)", who_am_i);
+                log::warn!(
+                    "MPU6886 WHO_AM_I check failed: 0x{:02x} (expected 0x19)",
+                    who_am_i
+                );
             }
 
             // リセットしてデバイスをウェイクアップ
@@ -777,7 +794,10 @@ mod imu {
         }
 
         /// キャリブレーション（500サンプル平均）
-        pub fn calibrate<D: embedded_hal::delay::DelayNs>(&mut self, delay: &mut D) -> Result<(), E> {
+        pub fn calibrate<D: embedded_hal::delay::DelayNs>(
+            &mut self,
+            delay: &mut D,
+        ) -> Result<(), E> {
             let mut gyro_sum = [0.0f32; 3];
             let mut accel_sum = [0.0f32; 3];
 
@@ -976,15 +996,18 @@ mod pid {
         pub kdst: f32,   // 速度積分ゲイン
         pub kpower: f32, // パワー係数
 
+        // 目標角度
+        pub target_angle: f32, // 目標角度オフセット (degrees, Arduino版では約-8°)
+
         // 状態変数
-        p_angle: f32,    // 比例項
-        i_angle: f32,    // 積分項
-        d_angle: f32,    // 微分項
-        k_speed: f32,    // 速度項
-        speed: f32,      // 速度累積
+        p_angle: f32, // 比例項
+        i_angle: f32, // 積分項
+        d_angle: f32, // 微分項
+        k_speed: f32, // 速度項
+        speed: f32,   // 速度累積
 
         // リミット
-        i_limit: f32,    // 積分項のリミット
+        i_limit: f32, // 積分項のリミット
     }
 
     impl PidController {
@@ -999,12 +1022,13 @@ mod pid {
         /// - kpower = 0.003
         pub fn new() -> Self {
             Self {
-                kp: 6.3,
+                kp: 6.3,  // Arduino版のデフォルト値
                 ki: 1.4,
                 kd: 0.48,
                 kspd: 5.0,
                 kdst: 0.14,
                 kpower: 0.003,
+                target_angle: -8.0, // Arduino版: 約-8°後傾（Pitch_offset相当）
                 p_angle: 0.0,
                 i_angle: 0.0,
                 d_angle: 0.0,
@@ -1027,9 +1051,12 @@ mod pid {
             // 速度更新
             self.speed += self.kpower * power_input;
 
+            // 目標角度との偏差を計算
+            let error = angle - self.target_angle;
+
             // PID項計算
-            self.p_angle = self.kp * angle;
-            self.i_angle += self.ki * angle + self.kdst * self.speed;
+            self.p_angle = self.kp * error;
+            self.i_angle += self.ki * error + self.kdst * self.speed;
             self.d_angle = self.kd * d_angle;
             self.k_speed = self.kspd * self.speed;
 
@@ -1097,10 +1124,7 @@ mod motor {
         /// # Arguments
         /// * `pin_l` - 左モーターGPIO (GPIO 0)
         /// * `pin_r` - 右モーターGPIO (GPIO 26)
-        pub fn new(
-            pin_l: Output<'d>,
-            pin_r: Output<'d>,
-        ) -> Self {
+        pub fn new(pin_l: Output<'d>, pin_r: Output<'d>) -> Self {
             Self {
                 pin_l,
                 pin_r,
