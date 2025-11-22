@@ -1028,7 +1028,7 @@ mod pid {
                 kspd: 5.0,
                 kdst: 0.14,
                 kpower: 0.003,
-                target_angle: -8.0, // Arduino版: 約-8°後傾（Pitch_offset相当）
+                target_angle: 8.0, // Arduino版: Pitch_offsetで加算される値（約8°後傾させる）
                 p_angle: 0.0,
                 i_angle: 0.0,
                 d_angle: 0.0,
@@ -1051,12 +1051,13 @@ mod pid {
             // 速度更新
             self.speed += self.kpower * power_input;
 
-            // 目標角度との偏差を計算
-            let error = angle - self.target_angle;
+            // Arduino版と同じ方式：角度にオフセットを加算
+            // target_angle = 8 を加算することで、垂直時(0°)が+8°になり後傾させる
+            let angle_with_offset = angle + self.target_angle;
 
-            // PID項計算
-            self.p_angle = self.kp * error;
-            self.i_angle += self.ki * error + self.kdst * self.speed;
+            // PID項計算（目標角度は0°）
+            self.p_angle = self.kp * angle_with_offset;
+            self.i_angle += self.ki * angle_with_offset + self.kdst * self.speed;
             self.d_angle = self.kd * d_angle;
             self.k_speed = self.kspd * self.speed;
 
