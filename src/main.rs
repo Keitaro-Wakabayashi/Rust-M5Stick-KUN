@@ -543,9 +543,19 @@ mod imu {
         pub fn get_pitch(&mut self) -> Result<f32, E> {
             // キャリブレーション済み値を使用
             let accel = self.read_accel_calibrated()?;
-            // ロボット姿勢に合わせてatan2の引数を入れ替え
-            // 垂直時（USB上、画面前）: Y≈-1g, Z≈0g → atan2(0, -1) = 0°
-            let pitch = libm::atan2f(accel[2], accel[1]) * RAD_TO_DEG;
+            // ロボット姿勢に合わせてatan2の引数を入れ替え + 180°オフセット補正
+            // 垂直時（USB上、画面前）: Y≈-1g, Z≈0g
+            // atan2(0, -1) = 180° → 180° - 180° = 0°
+            let mut pitch = libm::atan2f(accel[2], accel[1]) * RAD_TO_DEG;
+
+            // 180°オフセット補正
+            pitch -= 180.0;
+
+            // -180°～+180°の範囲に正規化
+            if pitch < -180.0 {
+                pitch += 360.0;
+            }
+
             Ok(pitch)
         }
     }
