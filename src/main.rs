@@ -580,19 +580,173 @@ mod kalman {
 }
 
 /// PID制御モジュール
-#[allow(dead_code)]
+///
+/// 倒立振子の姿勢制御用PIDコントローラー
 mod pid {
-    // TODO: PID制御パラメータ構造体
-    // TODO: PID_ctrl() 実装
-    // TODO: PID_reset() 実装
+    /// PID制御パラメータ
+    pub struct PidController {
+        // PIDゲイン
+        pub kp: f32,
+        pub ki: f32,
+        pub kd: f32,
+        pub kspd: f32,   // 速度フィードバックゲイン
+        pub kdst: f32,   // 速度積分ゲイン
+        pub kpower: f32, // パワー係数
+
+        // 状態変数
+        p_angle: f32,    // 比例項
+        i_angle: f32,    // 積分項
+        d_angle: f32,    // 微分項
+        k_speed: f32,    // 速度項
+        speed: f32,      // 速度累積
+
+        // リミット
+        i_limit: f32,    // 積分項のリミット
+    }
+
+    impl PidController {
+        /// 新しいPIDコントローラーを作成
+        ///
+        /// デフォルトパラメータ（Arduino元コードより）:
+        /// - kp = 6.3
+        /// - ki = 1.4
+        /// - kd = 0.48
+        /// - kspd = 5.0
+        /// - kdst = 0.14
+        /// - kpower = 0.003
+        pub fn new() -> Self {
+            Self {
+                kp: 6.3,
+                ki: 1.4,
+                kd: 0.48,
+                kspd: 5.0,
+                kdst: 0.14,
+                kpower: 0.003,
+                p_angle: 0.0,
+                i_angle: 0.0,
+                d_angle: 0.0,
+                k_speed: 0.0,
+                speed: 0.0,
+                i_limit: 300.0,
+            }
+        }
+
+        /// PID制御計算
+        ///
+        /// # Arguments
+        /// * `angle` - 現在の角度 (degrees, 0 = 垂直)
+        /// * `d_angle` - 角速度 (degrees/s)
+        /// * `power_input` - 外部パワー入力（通常0、リモコン操作時に使用）
+        ///
+        /// # Returns
+        /// モーターパワー出力 (-1000 ~ 1000)
+        pub fn update(&mut self, angle: f32, d_angle: f32, power_input: f32) -> f32 {
+            // 速度更新
+            self.speed += self.kpower * power_input;
+
+            // PID項計算
+            self.p_angle = self.kp * angle;
+            self.i_angle += self.ki * angle + self.kdst * self.speed;
+            self.d_angle = self.kd * d_angle;
+            self.k_speed = self.kspd * self.speed;
+
+            // アンチワインドアップ: 積分項のリミット
+            if self.i_angle > self.i_limit {
+                self.reset();
+                return 0.0;
+            }
+            if self.i_angle < -self.i_limit {
+                self.reset();
+                return 0.0;
+            }
+
+            // 出力計算
+            let power = self.p_angle + self.i_angle + self.d_angle + self.k_speed;
+            power
+        }
+
+        /// PID状態をリセット
+        pub fn reset(&mut self) {
+            self.p_angle = 0.0;
+            self.i_angle = 0.0;
+            self.d_angle = 0.0;
+            self.k_speed = 0.0;
+            self.speed = 0.0;
+        }
+
+        /// パラメータを設定
+        pub fn set_gains(&mut self, kp: f32, ki: f32, kd: f32) {
+            self.kp = kp;
+            self.ki = ki;
+            self.kd = kd;
+        }
+    }
+
+    impl Default for PidController {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 }
 
 /// モーター制御モジュール
-#[allow(dead_code)]
+///
+/// サーボモーター(連続回転)をPWMで制御（Phase 4で完全実装予定）
 mod motor {
-    // TODO: PWM初期化
-    // TODO: pulse_drive() 実装
-    // TODO: servo_stop() 実装
+    /// モーター制御構造体（Phase 4で完全実装予定）
+    pub struct MotorController {
+        offset_l: i16,
+        offset_r: i16,
+        neutral: u32, // 1500us
+        enabled: bool,
+    }
+
+    impl MotorController {
+        /// モーターコントローラーを初期化（スタブ）
+        pub fn new() -> Self {
+            Self {
+                offset_l: 0,
+                offset_r: 0,
+                neutral: 1500,
+                enabled: false,
+            }
+        }
+
+        /// モーターを駆動（スタブ: ログ出力のみ）
+        ///
+        /// # Arguments
+        /// * `power_l` - 左モーターパワー (-1000 ~ 1000)
+        /// * `power_r` - 右モーターパワー (-1000 ~ 1000)
+        pub fn drive(&mut self, power_l: f32, power_r: f32) {
+            if !self.enabled {
+                return;
+            }
+            // TODO: Phase 4でLEDC PWM実装
+            log::debug!("Motor: L={:.1}, R={:.1}", power_l, power_r);
+        }
+
+        /// モーターを停止
+        pub fn stop(&mut self) {
+            self.drive(0.0, 0.0);
+        }
+
+        /// モーターを有効化/無効化
+        pub fn set_enabled(&mut self, enabled: bool) {
+            self.enabled = enabled;
+        }
+
+        /// オフセットを設定
+        pub fn set_offset(&mut self, offset_l: i16, offset_r: i16) {
+            self.offset_l = offset_l;
+            self.offset_r = offset_r;
+        }
+    }
+
+    impl Default for MotorController {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 }
 
 /// BLE通信モジュール (RemoteXY)
