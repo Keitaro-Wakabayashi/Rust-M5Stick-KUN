@@ -833,6 +833,11 @@ mod imu {
         }
 
         /// 加速度からPitch角度を計算 (単位: 度)
+        ///
+        /// 角度の定義:
+        /// - 垂直（USB上、画面前）: 0°
+        /// - 前に傾く（画面下向き）: 負の角度（例: -10°）
+        /// - 後ろに傾く（画面上向き）: 正の角度（例: +10°）
         pub fn get_pitch(&mut self) -> Result<f32, E> {
             // キャリブレーション済み値を使用
             let accel = self.read_accel_calibrated()?;
@@ -849,7 +854,8 @@ mod imu {
                 pitch += 360.0;
             }
 
-            Ok(pitch)
+            // 符号を反転（前=負、後ろ=正にする）
+            Ok(-pitch)
         }
     }
 }
