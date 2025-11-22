@@ -79,7 +79,35 @@ fn main() -> ! {
     let mut led = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
     led.set_high(); // 起動中はLED点灯
 
+    // LCDバックライト初期化 (GPIO 27)
+    let mut lcd_backlight = Output::new(peripherals.GPIO27, Level::High, OutputConfig::default());
+    lcd_backlight.set_high(); // バックライト点灯
+
     info!("GPIO初期化完了");
+
+    // SPI初期化 (SCK: GPIO13, MOSI: GPIO15, CS: GPIO5 for LCD)
+    info!("SPI初期化中...");
+    use embedded_hal_bus::spi::ExclusiveDevice;
+    use esp_hal::spi::master::{Config as SpiConfig, Spi};
+
+    let spi_config = SpiConfig::default().with_frequency(Rate::from_khz(40_000));
+    let spi = Spi::new(peripherals.SPI2, spi_config)
+        .expect("SPI init failed")
+        .with_sck(peripherals.GPIO13)
+        .with_mosi(peripherals.GPIO15);
+
+    let spi_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+    let spi_device = ExclusiveDevice::new(spi, spi_cs, Delay::new())
+        .expect("SPI device creation failed");
+
+    // LCD制御ピン (DC: GPIO14, RST: GPIO12)
+    let lcd_dc = Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default());
+    let lcd_rst = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
+
+    // LCD初期化
+    info!("LCD初期化中...");
+    let mut display = display::init_display(spi_device, lcd_dc, lcd_rst, &mut delay);
+    info!("LCD初期化完了");
 
     // I2C初期化 (SDA: GPIO21, SCL: GPIO22, 100kHz)
     info!("I2C初期化中...");
@@ -118,28 +146,45 @@ fn main() -> ! {
     }
 
     led.set_low(); // キャリブレーション完了、LED消灯
+
+    // Kalmanフィルター初期化
+    let mut kalman = kalman::KalmanFilter::new();
+    // 初期角度を設定（起動時の加速度計から）
+    if let Ok(pitch) = imu.get_pitch() {
+        kalman.set_angle(pitch);
+        info!("Kalmanフィルター初期化: angle = {:.2}°", pitch);
+    }
+
     info!("セットアップ完了!");
 
-    // メインループ: IMUデータを読み取って表示
+    // メインループ: IMUデータを読み取ってKalmanフィルターで処理
+    const DT: f32 = 0.01; // 10ms = 0.01秒
     loop {
         // 加速度とジャイロを取得
-        if let (Ok(accel), Ok(gyro), Ok(pitch)) = (
+        if let (Ok(accel), Ok(gyro), Ok(pitch_raw)) = (
             imu.read_accel_calibrated(),
             imu.read_gyro_calibrated(),
             imu.get_pitch(),
         ) {
+            // Kalmanフィルター更新（Y軸ジャイロを使用）
+            let pitch_filtered = kalman.update(pitch_raw, gyro[1], DT);
+
+            // LCDに描画（フィルター後の角度を表示）
+            if let Err(_) = display::draw_imu_data(&mut display, accel, gyro, pitch_filtered) {
+                error!("LCD描画エラー");
+            }
+
+            // シリアル出力（生データとフィルター後を比較）
             info!(
-                "Accel: [{:.3}, {:.3}, {:.3}] g | Gyro: [{:.3}, {:.3}, {:.3}] deg/s | Pitch: {:.2}°",
-                accel[0], accel[1], accel[2],
-                gyro[0], gyro[1], gyro[2],
-                pitch
+                "Pitch: Raw={:.2}° | Filtered={:.2}° | Gyro Y={:.1}°/s",
+                pitch_raw, pitch_filtered, gyro[1]
             );
         } else {
             error!("IMUデータ取得失敗");
         }
 
-        // 100ms待機
-        delay.delay_millis(100);
+        // 10ms待機（100Hz更新）
+        delay.delay_millis(10);
     }
 }
 
@@ -148,11 +193,125 @@ fn main() -> ! {
 // ============================================================================
 
 /// LCD制御モジュール (ST7789V)
-#[allow(dead_code)]
 mod display {
-    // TODO: mipidsi を使用してLCD初期化
-    // TODO: embedded-graphics で顔の描画
-    // TODO: draw_smile(), draw_henoji(), draw_wink() 実装
+    use display_interface_spi::SPIInterface;
+    use embedded_graphics::{
+        mono_font::{ascii::FONT_6X10, MonoTextStyle},
+        pixelcolor::Rgb565,
+        prelude::*,
+        text::Text,
+    };
+    use embedded_hal_bus::spi::ExclusiveDevice;
+    use esp_hal::{
+        delay::Delay,
+        gpio::Output,
+        spi::master::Spi,
+    };
+    use mipidsi::{models::ST7789, options::ColorInversion, Builder};
+
+    pub type SpiDeviceType = ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>;
+
+    pub type DisplayType =
+        mipidsi::Display<SPIInterface<SpiDeviceType, Output<'static>>, ST7789, Output<'static>>;
+
+    /// M5StickC Plus2のLCD初期化
+    ///
+    /// # ハードウェア
+    /// - LCD: ST7789V (135x240)
+    /// - SPI: GPIO 13 (SCK), GPIO 15 (MOSI), GPIO 5 (CS)
+    /// - DC: GPIO 14
+    /// - RST: GPIO 12
+    pub fn init_display(
+        spi_device: SpiDeviceType,
+        dc: Output<'static>,
+        rst: Output<'static>,
+        delay: &mut Delay,
+    ) -> DisplayType {
+        // SPIインターフェース作成
+        let di = SPIInterface::new(spi_device, dc);
+
+        // ST7789ディスプレイを初期化
+        // M5StickC Plus2: 135x240, Portrait mode
+        let display = Builder::new(ST7789, di)
+            .display_size(135, 240)
+            .display_offset(52, 40) // M5StickC Plus2のオフセット
+            .color_order(mipidsi::options::ColorOrder::Rgb)
+            .invert_colors(ColorInversion::Inverted)
+            .reset_pin(rst)
+            .init(delay)
+            .expect("LCD init failed");
+
+        display
+    }
+
+    /// IMUデータをLCDに表示
+    pub fn draw_imu_data(
+        display: &mut DisplayType,
+        accel: [f32; 3],
+        gyro: [f32; 3],
+        pitch: f32,
+    ) -> Result<(), ()> {
+        use core::fmt::Write;
+        use heapless::String;
+
+        // 画面クリア
+        display.clear(Rgb565::BLACK).map_err(|_| ())?;
+
+        // テキストスタイル（白文字）
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+
+        // タイトル
+        Text::new("M5Stick-Kun IMU", Point::new(10, 15), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // 加速度表示
+        let mut buf: String<64> = String::new();
+        write!(&mut buf, "Accel X:{:.2}g", accel[0]).ok();
+        Text::new(&buf, Point::new(5, 35), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        buf.clear();
+        write!(&mut buf, "Accel Y:{:.2}g", accel[1]).ok();
+        Text::new(&buf, Point::new(5, 50), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        buf.clear();
+        write!(&mut buf, "Accel Z:{:.2}g", accel[2]).ok();
+        Text::new(&buf, Point::new(5, 65), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // ジャイロ表示
+        buf.clear();
+        write!(&mut buf, "Gyro X:{:.1}", gyro[0]).ok();
+        Text::new(&buf, Point::new(5, 85), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        buf.clear();
+        write!(&mut buf, "Gyro Y:{:.1}", gyro[1]).ok();
+        Text::new(&buf, Point::new(5, 100), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        buf.clear();
+        write!(&mut buf, "Gyro Z:{:.1}", gyro[2]).ok();
+        Text::new(&buf, Point::new(5, 115), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // Pitch角度表示（大きく）
+        buf.clear();
+        write!(&mut buf, "Pitch:{:.1}deg", pitch).ok();
+        Text::new(&buf, Point::new(5, 130), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        Ok(())
+    }
 }
 
 /// IMU制御モジュール (MPU6886)
@@ -319,10 +478,105 @@ mod imu {
 }
 
 /// Kalmanフィルターモジュール
-#[allow(dead_code)]
+///
+/// 1次元Kalmanフィルター: ジャイロと加速度計のデータを融合して角度を推定
 mod kalman {
-    // TODO: Kalman構造体とロジック実装
-    // TODO: setAngle(), getAngle() 実装
+    /// Kalmanフィルター状態
+    pub struct KalmanFilter {
+        /// 推定角度 (degrees)
+        angle: f32,
+        /// 推定バイアス (degrees/s)
+        bias: f32,
+        /// 推定誤差共分散行列 P[2][2]
+        p: [[f32; 2]; 2],
+        /// プロセスノイズ共分散 Q
+        q_angle: f32,
+        q_bias: f32,
+        /// 測定ノイズ共分散 R
+        r_measure: f32,
+    }
+
+    impl KalmanFilter {
+        /// 新しいKalmanフィルターを作成
+        ///
+        /// デフォルトパラメータ:
+        /// - Q_angle = 0.001 (角度のプロセスノイズ)
+        /// - Q_bias = 0.003 (バイアスのプロセスノイズ)
+        /// - R_measure = 0.03 (測定ノイズ)
+        pub fn new() -> Self {
+            Self {
+                angle: 0.0,
+                bias: 0.0,
+                p: [[0.0, 0.0], [0.0, 0.0]],
+                q_angle: 0.001,
+                q_bias: 0.003,
+                r_measure: 0.03,
+            }
+        }
+
+        /// 角度を初期化
+        pub fn set_angle(&mut self, angle: f32) {
+            self.angle = angle;
+        }
+
+        /// 現在の推定角度を取得
+        pub fn get_angle(&self) -> f32 {
+            self.angle
+        }
+
+        /// Kalmanフィルター更新
+        ///
+        /// # Arguments
+        /// * `new_angle` - 加速度計から計算した角度 (degrees)
+        /// * `new_rate` - ジャイロの角速度 (degrees/s)
+        /// * `dt` - 時間ステップ (seconds)
+        ///
+        /// # Returns
+        /// フィルター後の角度 (degrees)
+        pub fn update(&mut self, new_angle: f32, new_rate: f32, dt: f32) -> f32 {
+            // Step 1: 予測 (Predict)
+            // 角度を積分で予測
+            let rate = new_rate - self.bias;
+            self.angle += dt * rate;
+
+            // 誤差共分散行列の予測
+            self.p[0][0] += dt * (dt * self.p[1][1] - self.p[0][1] - self.p[1][0] + self.q_angle);
+            self.p[0][1] -= dt * self.p[1][1];
+            self.p[1][0] -= dt * self.p[1][1];
+            self.p[1][1] += self.q_bias * dt;
+
+            // Step 2: 更新 (Update)
+            // イノベーション（測定残差）
+            let y = new_angle - self.angle;
+
+            // イノベーション共分散
+            let s = self.p[0][0] + self.r_measure;
+
+            // Kalmanゲイン
+            let k = [self.p[0][0] / s, self.p[1][0] / s];
+
+            // 状態更新
+            self.angle += k[0] * y;
+            self.bias += k[1] * y;
+
+            // 誤差共分散行列の更新
+            let p00_temp = self.p[0][0];
+            let p01_temp = self.p[0][1];
+
+            self.p[0][0] -= k[0] * p00_temp;
+            self.p[0][1] -= k[0] * p01_temp;
+            self.p[1][0] -= k[1] * p00_temp;
+            self.p[1][1] -= k[1] * p01_temp;
+
+            self.angle
+        }
+    }
+
+    impl Default for KalmanFilter {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 }
 
 /// PID制御モジュール
