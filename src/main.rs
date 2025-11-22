@@ -194,8 +194,8 @@ fn main() -> ! {
             imu.read_gyro_calibrated(),
             imu.get_pitch(),
         ) {
-            // Kalmanフィルター更新（Y軸ジャイロを使用）
-            let pitch_filtered = kalman.update(pitch_raw, gyro[1], DT);
+            // Kalmanフィルター更新（X軸ジャイロを使用）
+            let pitch_filtered = kalman.update(pitch_raw, gyro[0], DT);
 
             // 角速度を計算（微分）
             let d_pitch = (pitch_filtered - prev_pitch) / DT;
@@ -214,8 +214,8 @@ fn main() -> ! {
 
             // シリアル出力（制御状態を表示）
             info!(
-                "Pitch={:.2}° | dP={:.1}°/s | Power={:.0}",
-                pitch_filtered, d_pitch, power
+                "Pitch={:.2}° | Gyro X={:.1}°/s | Power={:.0}",
+                pitch_filtered, gyro[0], power
             );
 
             // PWMパルス生成（20ms周期の一部として実行）
@@ -668,7 +668,7 @@ mod pid {
                 d_angle: 0.0,
                 k_speed: 0.0,
                 speed: 0.0,
-                i_limit: 300.0,
+                i_limit: 10000.0, // アンチワインドアップのリミット（大きめに設定）
             }
         }
 
