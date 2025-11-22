@@ -144,9 +144,28 @@ fn main() -> ! {
     }
 
     // キャリブレーション実行
-    info!("キャリブレーション開始 (500サンプル, 約1秒)...");
+    info!("============================================");
+    info!("キャリブレーション開始");
+    info!("重要: M5StickCを以下の姿勢で静止させてください");
+    info!("  - 画面: 上向き（天井を向く）");
+    info!("  - 本体: 水平に置く");
+    info!("  ※ Arduino版と同じキャリブレーション方式");
+    info!("3秒後に開始します...");
+    info!("============================================");
+    delay.delay_millis(3000);
+
+    info!("キャリブレーション実行中 (500サンプル, 約1秒)...");
     match imu.calibrate(&mut delay) {
-        Ok(_) => info!("キャリブレーション完了"),
+        Ok(_) => {
+            info!("キャリブレーション完了");
+            // デバッグ: キャリブレーション直後の値を確認
+            if let (Ok(accel), Ok(gyro)) = (imu.read_accel_calibrated(), imu.read_gyro_calibrated()) {
+                info!("キャリブレーション後の値:");
+                info!("  Accel: X={:.3}g Y={:.3}g Z={:.3}g", accel[0], accel[1], accel[2]);
+                info!("  Gyro: X={:.1}°/s Y={:.1}°/s Z={:.1}°/s", gyro[0], gyro[1], gyro[2]);
+                info!("  期待値: Accel全軸≈0g, Gyro全軸≈0°/s");
+            }
+        }
         Err(_) => {
             error!("キャリブレーション失敗!");
             loop {
@@ -489,13 +508,13 @@ mod imu {
             self.gyro_offset[1] = gyro_sum[1] / 500.0;
             self.gyro_offset[2] = gyro_sum[2] / 500.0;
 
-            // 加速度オフセット
-            // ロボット姿勢: 画面が前、USB端子が上 → Y軸が上向き（重力方向）
-            // X軸とZ軸: ゼロ点補正
-            // Y軸: 重力(1g)を引いてゼロ点にする
+            // 加速度オフセット（Arduino版と同じロジック）
+            // キャリブレーション姿勢: 画面が上、水平 → Z軸が重力方向（-1g）
+            // X軸とY軸: ゼロ点補正
+            // Z軸: 重力(1g)を引いてゼロ点にする
             self.accel_offset[0] = accel_sum[0] / 500.0;
-            self.accel_offset[1] = accel_sum[1] / 500.0 - 1.0; // Y軸: 測定値-1gをオフセットに
-            self.accel_offset[2] = accel_sum[2] / 500.0;
+            self.accel_offset[1] = accel_sum[1] / 500.0;
+            self.accel_offset[2] = accel_sum[2] / 500.0 - 1.0; // Z軸: 測定値-1gをオフセットに
 
             Ok(())
         }
@@ -522,10 +541,10 @@ mod imu {
 
         /// 加速度からPitch角度を計算 (単位: 度)
         pub fn get_pitch(&mut self) -> Result<f32, E> {
-            // キャリブレーション済み値を使用（Y軸の重力オフセットが補正される）
+            // キャリブレーション済み値を使用
             let accel = self.read_accel_calibrated()?;
-            // Pitch = atan2(Y, Z) だが、符号を反転して前傾=マイナス、後傾=プラスにする
-            let pitch = -libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
+            // Arduino版と同じ: atan2(Y, Z) そのまま（符号反転なし）
+            let pitch = libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
             Ok(pitch)
         }
     }
