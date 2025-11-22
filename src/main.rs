@@ -293,8 +293,9 @@ fn main() -> ! {
                     // ローパスフィルター（Arduino版と同じ）
                     pitch_filter = (pitch_kalman + pitch_filter * (FIL_N - 1.0)) / FIL_N;
 
-                    // 角度範囲チェック（-30° ～ +30°）
-                    if pitch_filter >= -30.0 && pitch_filter <= 30.0 {
+                    // 角度範囲チェック（目標角度-8°を中心に±22°の範囲）
+                    // -8° - 22° = -30°, -8° + 22° = +14°
+                    if pitch_filter >= -30.0 && pitch_filter <= 14.0 {
                         wait_count += 1;
 
                         // LCD更新（100msごと = 10カウントごと）
@@ -360,6 +361,11 @@ fn main() -> ! {
                     // PID制御
                     let pid = pid_opt.as_mut().unwrap();
                     let power = pid.update(pitch_filter, d_angle, 0.0);
+
+                    // デバッグ: Power値を出力（10回に1回）
+                    if last_display_update == 0 {
+                        info!("Pitch={:.2}° Power={:.0}", pitch_filter, power);
+                    }
 
                     // モーター駆動
                     let motor = motor_opt.as_mut().unwrap();
