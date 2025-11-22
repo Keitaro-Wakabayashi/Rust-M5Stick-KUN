@@ -489,10 +489,13 @@ mod imu {
             self.gyro_offset[1] = gyro_sum[1] / 500.0;
             self.gyro_offset[2] = gyro_sum[2] / 500.0;
 
-            // 加速度オフセット: X/Y軸はゼロ点補正、Z軸は重力を残す
+            // 加速度オフセット
+            // ロボット姿勢: 画面が前、USB端子が上 → Y軸が上向き（重力方向）
+            // X軸とZ軸: ゼロ点補正
+            // Y軸: 重力(1g)を引いてゼロ点にする
             self.accel_offset[0] = accel_sum[0] / 500.0;
-            self.accel_offset[1] = accel_sum[1] / 500.0;
-            self.accel_offset[2] = accel_sum[2] / 500.0 - 1.0; // Z軸: 測定値-1gをオフセットに
+            self.accel_offset[1] = accel_sum[1] / 500.0 - 1.0; // Y軸: 測定値-1gをオフセットに
+            self.accel_offset[2] = accel_sum[2] / 500.0;
 
             Ok(())
         }
@@ -519,9 +522,8 @@ mod imu {
 
         /// 加速度からPitch角度を計算 (単位: 度)
         pub fn get_pitch(&mut self) -> Result<f32, E> {
-            // キャリブレーション済み値ではなく生の値を使用
-            // （倒立振子では相対角度が重要で、絶対オフセットは不要）
-            let accel = self.read_accel()?;
+            // キャリブレーション済み値を使用（Y軸の重力オフセットが補正される）
+            let accel = self.read_accel_calibrated()?;
             // Pitch = atan2(Y, Z) だが、符号を反転して前傾=マイナス、後傾=プラスにする
             let pitch = -libm::atan2f(accel[1], accel[2]) * RAD_TO_DEG;
             Ok(pitch)
