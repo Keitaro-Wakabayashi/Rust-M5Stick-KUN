@@ -300,9 +300,9 @@ fn main() -> ! {
                     const PITCH_OFFSET: f32 = 65.0;
                     let pitch_corrected = pitch_kalman + PITCH_OFFSET;
 
-                    // ローパスフィルター（一時的に無効化してテスト）
+                    // ローパスフィルター（無効化: 遅延により制御が不安定になるため）
                     // pitch_filter = (pitch_corrected + pitch_filter * (FIL_N - 1.0)) / FIL_N;
-                    pitch_filter = pitch_corrected; // LPFなしで直接使用
+                    pitch_filter = pitch_corrected;
 
                     // 角度範囲チェック（目標角度81°を中心に±30°の範囲）
                     // 81° - 30° = 51°, 81° + 30° = 111°
@@ -359,9 +359,9 @@ fn main() -> ! {
                     const PITCH_OFFSET: f32 = 74.0; // 81 - 7 = 74
                     let pitch_corrected = pitch_kalman + PITCH_OFFSET;
 
-                    // ローパスフィルター（一時的に無効化してテスト）
+                    // ローパスフィルター（無効化: 遅延により制御が不安定になるため）
                     // pitch_filter = (pitch_corrected + pitch_filter * (FIL_N - 1.0)) / FIL_N;
-                    pitch_filter = pitch_corrected; // LPFなしで直接使用
+                    pitch_filter = pitch_corrected;
 
                     // 角度範囲チェック（目標角度81°から±50°程度の範囲）
                     // 31° ～ 131° くらいまで許容
@@ -377,11 +377,11 @@ fn main() -> ! {
                     // Arduino版と同じ：生のジャイロ値を使用
                     let d_angle = gyro[0];
 
-                    // PID制御（81°を基準とした偏差）
-                    // Arduino版では Pitch_offset=81 により、安定姿勢が81°付近になる
-                    // 81°からの偏差を計算してPIDに渡す
+                    // PID制御（目標角度を基準とした偏差）
+                    // 目標角度を大きくすると後傾姿勢になる
+                    const TARGET_ANGLE: f32 = 83.0; // 81°より2°後傾
                     let pid = pid_opt.as_mut().unwrap();
-                    let angle_from_target = pitch_filter - 81.0;
+                    let angle_from_target = pitch_filter - TARGET_ANGLE;
                     let power = pid.update(angle_from_target, d_angle, 0.0);
 
                     // デバッグ: Power値を出力（10回に1回）
@@ -1065,7 +1065,7 @@ mod pid {
         /// - kpower = 0.003
         pub fn new() -> Self {
             Self {
-                kp: 10.0, // パワー不足対策で増加（元: 6.3）
+                kp: 8.0, // パワー不足対策で増加（元: 6.3）
                 ki: 1.4,
                 kd: 0.48,
                 kspd: 5.0,
@@ -1105,14 +1105,15 @@ mod pid {
             self.d_angle = self.kd * d_angle;
             self.k_speed = self.kspd * self.speed;
 
-            // アンチワインドアップ: 積分項のリミット
-            if self.i_angle > self.i_limit {
-                self.reset();
-                return 0.0;
-            }
-            if self.i_angle < -self.i_limit {
-                self.reset();
-                return 0.0;
+            // アンチワインドアップ: 積分項のリミット（Arduino版と同じ）
+            // Arduino版（258-259行目）:
+            // if (I_Angle > 300) { power = Speed = I_Angle = Pitch_power = 0; }
+            // if (I_Angle < -300) { power = Speed = I_Angle = Pitch_power = 0; }
+            // → 積分項と速度項だけリセットして制御は継続
+            if self.i_angle > self.i_limit || self.i_angle < -self.i_limit {
+                self.i_angle = 0.0;
+                self.speed = 0.0;
+                // P項とD項は有効なので制御は継続される
             }
 
             // 出力計算
