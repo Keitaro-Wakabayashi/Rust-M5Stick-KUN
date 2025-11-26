@@ -174,6 +174,11 @@ fn main() -> ! {
     let mut pitch_filter: f32 = 0.0;
     const FIL_N: f32 = 5.0;
 
+    // ループ周期測定用（簡易版：ミリ秒カウンター）
+    let mut loop_count: u32 = 0;
+    let mut last_time_ms: u32 = 0;
+    let mut total_time_ms: u32 = 0;
+
     // Kalman, PID, Motorを後で初期化
     let mut kalman_opt: Option<kalman::KalmanFilter> = None;
     let mut pid_opt: Option<pid::PidController> = None;
@@ -290,12 +295,18 @@ fn main() -> ! {
                     let kalman = kalman_opt.as_mut().unwrap();
                     let pitch_kalman = kalman.update(pitch_raw, gyro[0], DT);
 
-                    // ローパスフィルター（Arduino版と同じ）
-                    pitch_filter = (pitch_kalman + pitch_filter * (FIL_N - 1.0)) / FIL_N;
+                    // Arduino版と同じオフセット補正（Pitch_offset = 81）
+                    // 安定姿勢で81°付近になるように調整
+                    const PITCH_OFFSET: f32 = 65.0;
+                    let pitch_corrected = pitch_kalman + PITCH_OFFSET;
 
-                    // 角度範囲チェック（目標角度-8°を中心に±22°の範囲）
-                    // -8° - 22° = -30°, -8° + 22° = +14°
-                    if pitch_filter >= -30.0 && pitch_filter <= 14.0 {
+                    // ローパスフィルター（一時的に無効化してテスト）
+                    // pitch_filter = (pitch_corrected + pitch_filter * (FIL_N - 1.0)) / FIL_N;
+                    pitch_filter = pitch_corrected; // LPFなしで直接使用
+
+                    // 角度範囲チェック（目標角度81°を中心に±30°の範囲）
+                    // 81° - 30° = 51°, 81° + 30° = 111°
+                    if pitch_filter >= 51.0 && pitch_filter <= 111.0 {
                         wait_count += 1;
 
                         // LCD更新（100msごと = 10カウントごと）
@@ -329,6 +340,10 @@ fn main() -> ! {
 
             // ==================== Balancing（制御実行中） ====================
             RobotState::Balancing => {
+                // 簡素化: 10ms周期で全処理を実行
+                // Arduino版はセンサー読み取りが高速ループだが、
+                // Rust版はシンプルに10ms周期で統一
+
                 // センサー読み取り
                 if let (Ok(_accel), Ok(gyro), Ok(pitch_raw)) = (
                     imu.read_accel_calibrated(),
@@ -339,12 +354,18 @@ fn main() -> ! {
                     let kalman = kalman_opt.as_mut().unwrap();
                     let pitch_kalman = kalman.update(pitch_raw, gyro[0], DT);
 
-                    // ローパスフィルター（Arduino版と同じ）
-                    // Pitch_filter = (Pitch + Pitch_filter * (fil_N - 1)) / fil_N
-                    pitch_filter = (pitch_kalman + pitch_filter * (FIL_N - 1.0)) / FIL_N;
+                    // Arduino版と同じオフセット補正（Pitch_offset = 81）
+                    // 安定姿勢（pitch_kalman ≈ 7°）で pitch ≈ 81° になるように
+                    const PITCH_OFFSET: f32 = 74.0; // 81 - 7 = 74
+                    let pitch_corrected = pitch_kalman + PITCH_OFFSET;
 
-                    // 角度範囲チェック（-30° ～ +30°）
-                    if pitch_filter < -30.0 || pitch_filter > 30.0 {
+                    // ローパスフィルター（一時的に無効化してテスト）
+                    // pitch_filter = (pitch_corrected + pitch_filter * (FIL_N - 1.0)) / FIL_N;
+                    pitch_filter = pitch_corrected; // LPFなしで直接使用
+
+                    // 角度範囲チェック（目標角度81°から±50°程度の範囲）
+                    // 31° ～ 131° くらいまで許容
+                    if pitch_filter < 30.0 || pitch_filter > 130.0 {
                         // 範囲外 → エラー状態へ
                         error!("範囲外に倒れた: {:.2}°", pitch_filter);
                         motor_opt.as_mut().unwrap().set_enabled(false);
@@ -354,22 +375,27 @@ fn main() -> ! {
                     }
 
                     // Arduino版と同じ：生のジャイロ値を使用
-                    // dAngle = (gyro[0] - gyroOffset[0]) だが、
-                    // read_gyro_calibrated()が既にオフセット補正済みなので、そのまま使用
                     let d_angle = gyro[0];
 
-                    // PID制御
+                    // PID制御（81°を基準とした偏差）
+                    // Arduino版では Pitch_offset=81 により、安定姿勢が81°付近になる
+                    // 81°からの偏差を計算してPIDに渡す
                     let pid = pid_opt.as_mut().unwrap();
-                    let power = pid.update(pitch_filter, d_angle, 0.0);
+                    let angle_from_target = pitch_filter - 81.0;
+                    let power = pid.update(angle_from_target, d_angle, 0.0);
 
                     // デバッグ: Power値を出力（10回に1回）
-                    if last_display_update == 0 {
+                    loop_count += 1;
+                    if loop_count % 10 == 0 {
                         info!("Pitch={:.2}° Power={:.0}", pitch_filter, power);
                     }
 
-                    // モーター駆動
+                    // モーター駆動（Arduino版: powerL = -power, powerR = power）
                     let motor = motor_opt.as_mut().unwrap();
-                    motor.drive(power, power);
+                    motor.drive(-power, power);
+
+                    // PWMパルス生成（高速・20ms待機なし）
+                    motor.pulse_drive(&mut delay);
 
                     // LCD更新（100msごと）
                     last_display_update += 1;
@@ -382,8 +408,8 @@ fn main() -> ! {
                         last_display_update = 0;
                     }
 
-                    // PWMパルス生成
-                    motor.pulse_drive(&mut delay);
+                    // 10ms待機（Arduino版のms10 += 10と同等）
+                    delay.delay_millis(10);
                 } else {
                     error!("センサー読み取りエラー");
                     delay.delay_millis(10);
@@ -1039,26 +1065,28 @@ mod pid {
         /// - kpower = 0.003
         pub fn new() -> Self {
             Self {
-                kp: 6.3,  // Arduino版のデフォルト値
+                kp: 10.0, // パワー不足対策で増加（元: 6.3）
                 ki: 1.4,
                 kd: 0.48,
                 kspd: 5.0,
                 kdst: 0.14,
                 kpower: 0.003,
-                target_angle: -8.0, // 目標角度: -8°（後傾）
+                target_angle: 8.0, // 目標角度: 安定姿勢（重心バランス位置）
                 p_angle: 0.0,
                 i_angle: 0.0,
                 d_angle: 0.0,
                 k_speed: 0.0,
                 speed: 0.0,
-                i_limit: 1000.0, // 積分リミットを緩める（応答性改善）
+                i_limit: 300.0, // Arduino版と同じ
             }
         }
 
-        /// PID制御計算
+        /// PID制御計算（Arduino版と同じロジック）
         ///
         /// # Arguments
-        /// * `angle` - 現在の角度 (degrees, 0 = 垂直)
+        /// * `angle` - 現在の角度（絶対値、degrees）
+        ///   - Arduino版と同じく、Kalman/LPFフィルター済みの角度をそのまま渡す
+        ///   - target_angleとの差分計算は行わない
         /// * `d_angle` - 角速度 (degrees/s)
         /// * `power_input` - 外部パワー入力（通常0、リモコン操作時に使用）
         ///
@@ -1068,14 +1096,12 @@ mod pid {
             // 速度更新
             self.speed += self.kpower * power_input;
 
-            // 目標角度との偏差を計算
-            // target_angle = -8° なので、垂直(0°)との偏差は 0 - (-8) = +8°
-            // これで後傾させる方向に制御
-            let error = angle - self.target_angle;
+            // Arduino版と完全一致: 絶対角度をそのまま使用
+            // P_Angle = kp * gain[2] * Angle （Arduino版 251行目）
 
             // PID項計算
-            self.p_angle = self.kp * error;
-            self.i_angle += self.ki * error + self.kdst * self.speed;
+            self.p_angle = self.kp * angle;
+            self.i_angle += self.ki * angle + self.kdst * self.speed;
             self.d_angle = self.kd * d_angle;
             self.k_speed = self.kspd * self.speed;
 
@@ -1167,8 +1193,9 @@ mod motor {
             }
 
             // パワーをPWMパルス幅に変換 (500us ~ 2500us)
-            // 左モーターは反転（-power_l）
-            let pulse_l = self.neutral as f32 - power_l + self.offset_l as f32;
+            // Arduino版: powerL = -power + offset, powerR = power + offset
+            // 両輪とも同じ方向に回転するように、同じ符号を使用
+            let pulse_l = self.neutral as f32 + power_l + self.offset_l as f32;
             let pulse_r = self.neutral as f32 + power_r + self.offset_r as f32;
 
             // 500us ~ 2500us にクランプ
@@ -1184,6 +1211,9 @@ mod motor {
             if !self.enabled {
                 return;
             }
+
+            // Arduino版と同じ: パルス幅だけ生成し、20ms周期待機はしない
+            // これにより高速ループが可能になる
 
             // パルス開始: 両方HIGHに設定
             self.pin_l.set_high();
@@ -1208,11 +1238,8 @@ mod motor {
                 self.pin_l.set_low();
             }
 
-            // 残りの周期を待機 (20ms - パルス幅)
-            let max_pulse = self.pulse_l_us.max(self.pulse_r_us);
-            if max_pulse < 20000 {
-                delay.delay_us(20000 - max_pulse);
-            }
+            // Arduino版に合わせて20ms周期待機は削除
+            // メインループが10ms周期で制御する
         }
 
         /// モーターを停止（ニュートラル位置）
