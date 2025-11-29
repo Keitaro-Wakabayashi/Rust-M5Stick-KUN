@@ -297,7 +297,7 @@ fn main() -> ! {
 
                     // Arduino版と同じオフセット補正（Pitch_offset = 81）
                     // 安定姿勢で81°付近になるように調整
-                    const PITCH_OFFSET: f32 = 65.0;
+                    const PITCH_OFFSET: f32 = 74.0;
                     let pitch_corrected = pitch_kalman + PITCH_OFFSET;
 
                     // ローパスフィルター（無効化: 遅延により制御が不安定になるため）
@@ -1065,7 +1065,7 @@ mod pid {
         /// - kpower = 0.003
         pub fn new() -> Self {
             Self {
-                kp: 8.0, // パワー不足対策で増加（元: 6.3）
+                kp: 35.0, // パワー不足対策で増加（元: 6.3）
                 ki: 1.4,
                 kd: 0.48,
                 kspd: 5.0,
