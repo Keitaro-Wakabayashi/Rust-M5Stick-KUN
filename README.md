@@ -99,6 +99,8 @@ cargo run --release
 
 ## コマンドリファレンス
 
+### 基本コマンド
+
 ```bash
 # ビルド
 cargo build
@@ -117,6 +119,117 @@ cargo run --release
 cargo flash
 cargo monitor
 cargo flash-and-monitor
+```
+
+### WSL2環境でのフラッシュ（推奨）
+
+WSL2からM5StickC Plus2にフラッシュする場合、`esptool` を使用します。
+
+**注:** このプロジェクトは `direct-boot` 形式を使用しているため、esptoolで直接アドレス0x0にフラッシュできます。
+
+#### 初回セットアップ
+
+1. **esptoolのインストール（WSL2内）**
+   ```bash
+   sudo apt install esptool python3-serial
+   ```
+
+2. **usbipd-winのインストール（Windows）**
+
+   PowerShell（管理者権限）で実行：
+   ```powershell
+   winget install --interactive --exact dorssel.usbipd-win
+   ```
+
+3. **USBデバイスのバインド（初回のみ）**
+
+   PowerShell（管理者権限）で実行：
+   ```powershell
+   # デバイス一覧を表示
+   usbipd list
+
+   # M5StickC Plus2をバインド（BUSIDは実際の値に置き換え）
+   usbipd bind --busid 1-3
+   ```
+
+#### 毎回の使用手順
+
+1. **ビルド（devcontainer内）**
+   ```bash
+   cargo build --release
+   ```
+
+2. **USBデバイスをWSL2にアタッチ（Windows PowerShell - 管理者）**
+   ```powershell
+   usbipd attach --wsl --busid 1-3
+   ```
+
+3. **フラッシュ（WSL2で実行）**
+
+   **方法A: スクリプト使用（推奨）**
+   ```bash
+   ./flash.sh /dev/ttyACM0
+   ```
+
+   **方法B: 手動コマンド**
+   ```bash
+   esptool --chip esp32 \
+     --port /dev/ttyACM0 \
+     --baud 460800 \
+     write_flash 0x0 \
+     target/xtensa-esp32-none-elf/release/m5stick-kun
+   ```
+
+4. **シリアルモニター**
+   ```bash
+   python3 -m serial.tools.miniterm /dev/ttyACM0 115200
+   ```
+
+   終了: `Ctrl+]`
+
+5. **使用後（オプション）**
+   ```powershell
+   # Windows PowerShell
+   usbipd detach --busid 1-3
+   ```
+
+#### flash.sh スクリプトオプション
+
+```bash
+# デフォルトポート (/dev/ttyUSB0) でフラッシュ
+./flash.sh
+
+# カスタムポート指定
+./flash.sh /dev/ttyACM0
+
+# スクリプトの動作:
+# 1. バイナリの存在確認
+# 2. デバイスの接続確認
+# 3. esptoolでアドレス0x0にフラッシュ実行（direct-boot形式）
+# 4. 完了メッセージとシリアルモニター起動方法を表示
+```
+
+#### トラブルシューティング
+
+**デバイスが見つからない場合:**
+```bash
+# WSL2内でデバイス確認
+lsusb                  # USB デバイス一覧
+ls -l /dev/ttyUSB*     # シリアルポート確認
+dmesg | tail           # USB接続ログ確認
+```
+
+**権限エラーの場合:**
+```bash
+sudo chmod 666 /dev/ttyUSB0
+# または
+sudo usermod -a -G dialout $USER  # ログアウト/ログインが必要
+```
+
+**フラッシュが遅い場合:**
+```bash
+# ボーレートを上げる（デバイスが対応している場合）
+esptool --chip esp32 --port /dev/ttyACM0 --baud 921600 write_flash 0x0 target/xtensa-esp32-none-elf/release/m5stick-kun
 ```
 
 ## Claude Code の使い方

@@ -8,7 +8,7 @@ description = "M5StickC Plus2 倒立振子ロボット (Rust版)"
 
 [dependencies]
 # ESP-HAL for ESP32 (no_std + alloc)
-esp-hal = { version = "1.0.0", features = ["esp32", "log-04"] }
+esp-hal = { version = "1.0.0", features = ["esp32", "log-04", "unstable"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32", "log-04"] }
 esp-backtrace = { version = "0.18.1", features = ["esp32", "panic-handler", "println"] }
 esp-println = { version = "0.16.1", features = ["esp32", "log-04"] }
@@ -36,6 +36,7 @@ libm = "0.2"
 # Utilities
 log = "0.4"
 heapless = "0.8"
+fugit = "0.3.9"
 
 [profile.release]
 opt-level = "z"     # Optimize for size
