@@ -36,7 +36,7 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     time::Rate,
 };
@@ -110,6 +110,11 @@ fn main() -> ! {
     // LCDバックライト初期化 (GPIO 27)
     let mut lcd_backlight = Output::new(peripherals.GPIO27, Level::High, OutputConfig::default());
     lcd_backlight.set_high(); // バックライト点灯
+
+    let btn_a = Input::new(
+        peripherals.GPIO37,
+        InputConfig::default().with_pull(Pull::Up),
+    );
 
     info!("GPIO初期化完了");
 
@@ -185,10 +190,23 @@ fn main() -> ! {
     let mut motor_opt: Option<motor::MotorController> =
         Some(motor::MotorController::new(motor_pin_l, motor_pin_r));
 
+    let mut motor_enable = false;
+
     info!("セットアップ完了! 状態マシン開始");
 
     // メインループ: 状態マシンベース
     loop {
+        if btn_a.is_low() {
+            delay.delay_millis(50);
+            if btn_a.is_low() {
+                motor_enable = !motor_enable;
+                info!("Moter: {}", if motor_enable { "ON" } else { "OFF" });
+            }
+
+            while btn_a.is_low() {
+                delay.delay_millis(10);
+            }
+        }
         match state {
             // ==================== キャリブレーション準備 ====================
             RobotState::CalibrationReady => {
@@ -311,7 +329,9 @@ fn main() -> ! {
 
                         // LCD更新（100msごと = 10カウントごと）
                         if wait_count % 10 == 0 {
-                            if let Err(_) = display::draw_ready(&mut display, wait_count) {
+                            if let Err(_) =
+                                display::draw_ready(&mut display, wait_count, motor_enable)
+                            {
                                 error!("LCD描画エラー");
                             }
                             info!(
@@ -323,8 +343,10 @@ fn main() -> ! {
                         // 2秒間安定（200カウント）したら動作開始
                         if wait_count >= 200 {
                             info!("垂直姿勢安定！バランス制御開始");
-                            motor_opt.as_mut().unwrap().set_enabled(true);
-                            state = RobotState::Balancing;
+                            if motor_enable {
+                                motor_opt.as_mut().unwrap().set_enabled(true);
+                                state = RobotState::Balancing;
+                            }
                         }
                     } else {
                         // 範囲外 → カウントリセット
@@ -578,7 +600,11 @@ mod display {
     }
 
     /// Ready画面（角度範囲内で待機中）
-    pub fn draw_ready(display: &mut DisplayType, wait_count: u16) -> Result<(), ()> {
+    pub fn draw_ready(
+        display: &mut DisplayType,
+        wait_count: u16,
+        motor_enable: bool,
+    ) -> Result<(), ()> {
         use core::fmt::Write;
         use embedded_graphics::mono_font::ascii::FONT_9X18_BOLD;
         use heapless::String;
@@ -598,6 +624,18 @@ mod display {
         let mut buf: String<32> = String::new();
         write!(&mut buf, "Wait: {:.1}s", (200 - wait_count) as f32 / 100.0).ok();
         Text::new(&buf, Point::new(30, 100), style)
+            .draw(display)
+            .map_err(|_| ())?;
+
+        // ボタン状態表示
+        let mut buf: String<32> = String::new();
+        write!(
+            &mut buf,
+            "Motor: {}.",
+            if motor_enable { "ON" } else { "OFF" }
+        )
+        .ok();
+        Text::new(&buf, Point::new(30, 140), style_bold)
             .draw(display)
             .map_err(|_| ())?;
 
