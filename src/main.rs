@@ -470,11 +470,15 @@ mod display {
         mono_font::{ascii::FONT_6X10, MonoTextStyle},
         pixelcolor::Rgb565,
         prelude::*,
+        primitives::{Ellipse, Line, PrimitiveStyle, Rectangle},
         text::Text,
     };
     use embedded_hal_bus::spi::ExclusiveDevice;
     use esp_hal::{delay::Delay, gpio::Output, spi::master::Spi};
     use mipidsi::{models::ST7789, options::ColorInversion, Builder};
+
+    // 顔の定数
+    const FACE_CENTER: i32 = 65;
 
     pub type SpiDeviceType =
         ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>;
@@ -673,6 +677,8 @@ mod display {
             .draw(display)
             .map_err(|_| ())?;
 
+        draw_stick_kun(display);
+
         Ok(())
     }
 
@@ -764,6 +770,77 @@ mod display {
             .draw(display)
             .map_err(|_| ())?;
 
+        Ok(())
+    }
+
+    // === 顔描画関数 ===
+
+    /// 初期顔描画
+    pub fn draw_stick_kun(display: &mut DisplayType) -> Result<(), ()> {
+        display.clear(Rgb565::RED).map_err(|_| ())?;
+        Rectangle::new(Point::new(0, 105), Size::new(134, 134))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(display)
+            .map_err(|_| ())?;
+        Ellipse::new(Point::new(FACE_CENTER - 27, 160), Size::new(10, 20))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(display)
+            .map_err(|_| ())?;
+        Ellipse::new(Point::new(FACE_CENTER + 27, 160), Size::new(10, 20))
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(display)
+            .map_err(|_| ())?;
+
+        for i in 0..5 {
+            Line::new(
+                Point::new(FACE_CENTER - 15, 200 + i),
+                Point::new(FACE_CENTER - 10, 204 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+
+            Line::new(
+                Point::new(FACE_CENTER - 10, 204 + i),
+                Point::new(FACE_CENTER, 206 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+
+            Line::new(
+                Point::new(FACE_CENTER, 206 + i),
+                Point::new(FACE_CENTER + 10, 204 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+
+            Line::new(
+                Point::new(FACE_CENTER + 10, 204 + i),
+                Point::new(FACE_CENTER + 15, 200 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+        }
+
+        for i in 0..5 {
+            Line::new(
+                Point::new(FACE_CENTER - 25, 130 + i),
+                Point::new(FACE_CENTER - 45, 125 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+            Line::new(
+                Point::new(FACE_CENTER + 25, 130 + i),
+                Point::new(FACE_CENTER + 45, 125 + i),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(display)
+            .map_err(|_| ())?;
+        }
         Ok(())
     }
 }
